@@ -1,4 +1,5 @@
 import { io, Socket } from 'socket.io-client';
+import { API_ORIGIN } from './apiConfig';
 
 class RealtimeSyncService {
   private socket: Socket | null = null;
@@ -8,12 +9,9 @@ class RealtimeSyncService {
   private onStatusChange: ((connected: boolean) => void) | null = null;
 
   private getSocketUrl() {
-    // Production frontend and Socket.IO are hosted by the same Render service.
-    // Ignoring an old VITE_SOCKET_URL prevents the client from reconnecting to
-    // the retired proxy host and showing an incorrect sync failure.
-    return import.meta.env.DEV
-      ? (import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001')
-      : window.location.origin;
+    // In a native APK the frontend runs under a local WebView origin. The
+    // shared origin helper selects the public Render Socket.IO host there.
+    return API_ORIGIN;
   }
 
   constructor() {
