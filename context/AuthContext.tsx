@@ -1,5 +1,12 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { API_ORIGIN } from '../services/apiConfig';
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  type User as FirebaseUser,
+} from 'firebase/auth';
+import { firebaseAuth } from '../services/firebase';
 
 export interface User {
   uid: string;
@@ -16,13 +23,38 @@ interface AuthContextType {
   loading: boolean;
 }
 
-interface AuthResponse {
-  user: User;
-  token: string;
-}
+const ADMIN_EMAILS = new Set(['alienterprese@gmail.com']);
 
-const USER_STORAGE_KEY = 'ali_enterprises_user';
-const TOKEN_STORAGE_KEY = 'ali_enterprises_session_token';
+const toAppUser = (firebaseUser: FirebaseUser): User => ({
+  uid: firebaseUser.uid,
+  email: firebaseUser.email,
+  displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || null,
+  isAdmin: Boolean(firebaseUser.email && ADMIN_EMAILS.has(firebaseUser.email.toLowerCase())),
+});
+
+const friendlyAuthError = (error: unknown): Error => {
+  const code = typeof error === 'object' && error && 'code' in error
+    ? String((error as { code: string }).code)
+    : '';
+
+  if (code === 'auth/invalid-credential' || code === 'auth/user-not-found' || code === 'auth/wrong-password') {
+    return new Error('Invalid email or password.');
+  }
+  if (code === 'auth/too-many-requests') {
+    return new Error('Too many attempts. Please wait a few minutes and try again.');
+  }
+  if (code === 'auth/network-request-failed') {
+    return new Error('Network error. Please check your internet connection and try again.');
+  }
+  if (code === 'auth/email-already-in-use') {
+    return new Error('This email already has an account. Please sign in instead.');
+  }
+  if (code === 'auth/weak-password') {
+    return new Error('Password must contain at least 6 characters.');
+  }
+
+  return new Error('Authentication could not be completed. Please try again.');
+};
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -32,96 +64,40 @@ export const useAuth = () => {
   return context;
 };
 
-async function readError(response: Response): Promise<string> {
-  try {
-    const body = await response.json();
-    return body.error || 'Authentication request failed.';
-  } catch {
-    return 'Authentication request failed.';
-  }
-}
-
-async function authRequest(path: string, payload?: Record<string, string>): Promise<AuthResponse> {
-  const response = await fetch(`${API_ORIGIN}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload || {}),
-  });
-  if (!response.ok) throw new Error(await readError(response));
-  return response.json();
-}
-
-function saveSession(user: User, token: string) {
-  localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
-  localStorage.setItem(TOKEN_STORAGE_KEY, token);
-}
-
-function clearSession() {
-  localStorage.removeItem(USER_STORAGE_KEY);
-  localStorage.removeItem(TOKEN_STORAGE_KEY);
-}
-
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    try {
-      const raw = localStorage.getItem(USER_STORAGE_KEY);
-      return raw ? JSON.parse(raw) as User : null;
-    } catch {
-      return null;
-    }
-  });
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const restoreSession = async () => {
-      const token = localStorage.getItem(TOKEN_STORAGE_KEY);
-      if (!token) {
-        setLoading(false);
-        return;
-      }
+    const unsubscribe = onAuthStateChanged(firebaseAuth, (firebaseUser) => {
+      setCurrentUser(firebaseUser ? toAppUser(firebaseUser) : null);
+      setLoading(false);
+    });
 
-      try {
-        const response = await fetch(`${API_ORIGIN}/api/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) throw new Error('Session expired');
-        const { user } = await response.json();
-        setCurrentUser(user);
-        localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
-      } catch {
-        clearSession();
-        setCurrentUser(null);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    restoreSession();
+    return unsubscribe;
   }, []);
 
   const login = async (email: string, password: string) => {
-    const { user, token } = await authRequest('/api/auth/login', { email, password });
-    saveSession(user, token);
-    setCurrentUser(user);
+    try {
+      const credential = await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
+      setCurrentUser(toAppUser(credential.user));
+    } catch (error) {
+      throw friendlyAuthError(error);
+    }
   };
 
   const register = async (email: string, password: string) => {
-    const { user, token } = await authRequest('/api/auth/register', { email, password });
-    saveSession(user, token);
-    setCurrentUser(user);
+    try {
+      const credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
+      setCurrentUser(toAppUser(credential.user));
+    } catch (error) {
+      throw friendlyAuthError(error);
+    }
   };
 
   const logout = async () => {
-    const token = localStorage.getItem(TOKEN_STORAGE_KEY);
-    try {
-      await fetch(`${API_ORIGIN}/api/auth/logout`, {
-        method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-    } finally {
-      clearSession();
-      setCurrentUser(null);
-    }
+    await signOut(firebaseAuth);
+    setCurrentUser(null);
   };
 
   return (

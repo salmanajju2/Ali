@@ -19,6 +19,7 @@
     "@emailjs/browser": "^4.4.1",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.7.0",
+    "firebase": "^11.10.0",
     "html2canvas": "^1.4.1",
     "html2pdf.js": "^0.14.0",
     "jspdf": "^4.1.0",

@@ -608,13 +608,20 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
           setAllTransactions(finalSorted);
           
-          if (isFullSync) {
-            await localDB.clearAndRepopulateTransactions(finalSorted);
-          } else {
-            // Save only the new/updated transactions incrementally
-            for (const tx of syncedFromD1) {
-              await localDB.saveTransaction(tx);
+          // Aiven is the authoritative transaction store. A stale/blocked
+          // IndexedDB cache must never turn a successful server sync into a
+          // visible Sync failed error on the device.
+          try {
+            if (isFullSync) {
+              await localDB.clearAndRepopulateTransactions(finalSorted);
+            } else {
+              // Save only the new/updated transactions incrementally
+              for (const tx of syncedFromD1) {
+                await localDB.saveTransaction(tx);
+              }
             }
+          } catch (cacheError) {
+            console.warn('Local cache update skipped after successful server sync:', cacheError);
           }
           console.log(`✅ App open sync complete. Loaded ${fetched.length} updates. Total: ${finalSorted.length}`);
         } else {
