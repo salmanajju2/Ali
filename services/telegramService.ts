@@ -1,8 +1,8 @@
-// API and frontend are served by the same Render service in production.
-// Never route uploads through the retired external proxy host.
-const PROXY_SERVER = import.meta.env.DEV
-  ? 'http://localhost:3001'
-  : window.location.origin;
+// Native APKs are served from a local WebView origin, so proxy calls must use
+// the public Render backend instead of window.location.origin.
+import { API_ORIGIN } from './apiConfig';
+
+const PROXY_SERVER = API_ORIGIN;
 
 
 export const BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN || '';
