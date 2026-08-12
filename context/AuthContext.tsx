@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { API_ORIGIN } from '../services/apiConfig';
 
 export interface User {
   uid: string;
@@ -22,7 +23,6 @@ interface AuthResponse {
 
 const USER_STORAGE_KEY = 'ali_enterprises_user';
 const TOKEN_STORAGE_KEY = 'ali_enterprises_session_token';
-const API_ORIGIN = typeof window === 'undefined' ? '' : window.location.origin;
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
