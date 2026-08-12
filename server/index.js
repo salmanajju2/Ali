@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 app.use(cors({
@@ -12,8 +13,8 @@ app.use(cors({
 }));
 
 
-// Health check endpoint
-app.get('/', (req, res) => {
+// API Health check endpoint
+app.get('/api/health', (req, res) => {
   res.send('Socket Server is running! 🚀');
 });
 
@@ -253,6 +254,14 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('❌ User disconnected');
   });
+});
+
+// Serve React static files in production
+app.use(express.static(path.join(__dirname, '../dist')));
+
+// Catch-all route for SPA routing (React Router)
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
 const PORT = process.env.PORT || 3001;
