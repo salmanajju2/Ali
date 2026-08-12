@@ -3,8 +3,90 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
+const { Pool } = require('pg');
 
 const app = express();
+
+const connectionString = process.env.DATABASE_URL;
+const pool = new Pool({
+  connectionString,
+  ssl: { rejectUnauthorized: false }
+});
+
+pool.query(`
+  CREATE TABLE IF NOT EXISTS transactions (
+    id SERIAL PRIMARY KEY,
+    date TEXT,
+    amount NUMERIC,
+    type TEXT,
+    company TEXT,
+    person TEXT,
+    notes TEXT,
+    paymentMethod TEXT,
+    location TEXT,
+    recorder TEXT,
+    slip TEXT,
+    isSynced BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(err => console.error('Error creating transactions table:', err));
+
+// REST API for Transactions (Aiven PostgreSQL)
+app.get('/api/transactions', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM transactions ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching transactions:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/transactions', async (req, res) => {
+  const { date, amount, type, company, person, notes, paymentMethod, location, recorder, slip } = req.body;
+  try {
+    const query = `
+      INSERT INTO transactions (date, amount, type, company, person, notes, paymentMethod, location, recorder, slip, isSynced)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
+      RETURNING id
+    `;
+    const values = [date, amount, type, company, person, notes, paymentMethod, location, recorder, slip];
+    const result = await pool.query(query, values);
+    res.json({ id: result.rows[0].id.toString(), ok: true });
+  } catch (err) {
+    console.error('Error adding transaction:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/transactions/:id', async (req, res) => {
+  const { id } = req.params;
+  const { date, amount, type, company, person, notes, paymentMethod, location, recorder, slip } = req.body;
+  try {
+    const query = `
+      UPDATE transactions 
+      SET date=$1, amount=$2, type=$3, company=$4, person=$5, notes=$6, paymentMethod=$7, location=$8, recorder=$9, slip=$10
+      WHERE id=$11
+    `;
+    const values = [date, amount, type, company, person, notes, paymentMethod, location, recorder, slip, parseInt(id)];
+    await pool.query(query, values);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Error updating transaction:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/transactions/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM transactions WHERE id=$1', [parseInt(id)]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Error deleting transaction:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 app.use(cors({
   origin: true,
   credentials: true,
