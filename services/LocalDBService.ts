@@ -55,6 +55,12 @@ class IndexedDBService {
 
       request.onsuccess = (event: any) => {
         this.db = event.target.result;
+        // A page that stays open during a database upgrade must reopen the
+        // connection cleanly instead of using a stale IndexedDB handle.
+        this.db!.onversionchange = () => {
+          this.db?.close();
+          this.db = null;
+        };
         resolve(this.db!);
       };
 
@@ -78,15 +84,26 @@ class IndexedDBService {
   }
 
   public async getTransactions(): Promise<Transaction[]> {
-    const db = await this.getDB();
-    return new Promise((resolve, reject) => {
-      const transactionObj = db.transaction([STORE_NAME], 'readonly');
-      const store = transactionObj.objectStore(STORE_NAME);
-      const request = store.getAll();
+    try {
+      const db = await this.getDB();
+      return await new Promise((resolve, reject) => {
+        const transactionObj = db.transaction([STORE_NAME], 'readonly');
+        const store = transactionObj.objectStore(STORE_NAME);
+        const request = store.getAll();
 
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = (event: any) => reject(event.target.error);
-    });
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = (event: any) => reject(event.target.error);
+        transactionObj.onabort = (event: any) => reject(event.target.error || new Error('IndexedDB read aborted'));
+      });
+    } catch (error) {
+      // The cloud database remains authoritative. If a device has a stale or
+      // blocked IndexedDB handle, continue with an empty local cache and fetch
+      // the server copy instead of failing the entire sync operation.
+      console.warn('Local transaction cache unavailable; continuing with server sync:', error);
+      this.db?.close();
+      this.db = null;
+      return [];
+    }
   }
 
   public async deleteTransaction(id: string): Promise<void> {
