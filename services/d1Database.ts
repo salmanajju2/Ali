@@ -2,7 +2,9 @@
 export class D1DatabaseService {
   private static instance: D1DatabaseService;
   private baseUrl: string;
-  private readonly FETCH_TIMEOUT_MS = 15000;
+  // Render free instances can need more than 15 seconds to wake and establish
+  // their first database connection on a mobile network.
+  private readonly FETCH_TIMEOUT_MS = 45000;
 
   private constructor() {
     this.baseUrl = ''; // Relative path, same origin on Render
@@ -10,10 +12,9 @@ export class D1DatabaseService {
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
-    // Render can briefly return a gateway error while an instance is waking up.
-    // Reads and API calls are retried once so a temporary network hiccup does not
-    // incorrectly leave the mobile UI in a permanent "Sync failed" state.
-    const maximumAttempts = 2;
+    // Render and Aiven can briefly be unavailable while a free instance wakes.
+    // Retrying prevents that transient state from being treated as data loss.
+    const maximumAttempts = 3;
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
@@ -25,7 +26,11 @@ export class D1DatabaseService {
           signal: controller.signal,
         });
 
-        const isTransientServerError = [502, 503, 504].includes(response.status);
+        const isTransientServerError =
+          response.status === 408 ||
+          response.status === 425 ||
+          response.status === 429 ||
+          response.status >= 500;
         if (!isTransientServerError || attempt === maximumAttempts) {
           return response;
         }
@@ -36,7 +41,7 @@ export class D1DatabaseService {
         clearTimeout(timeoutId);
       }
 
-      await new Promise(resolve => window.setTimeout(resolve, 1200));
+      await new Promise(resolve => setTimeout(resolve, 1500 * attempt));
     }
 
     throw lastError instanceof Error ? lastError : new Error('Unable to reach the backend API.');
