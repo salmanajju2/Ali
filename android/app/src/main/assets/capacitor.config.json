@@ -1,0 +1,19 @@
+{
+	"appId": "com.ali.enterprises",
+	"appName": "ali-enterprises",
+	"webDir": "dist",
+	"plugins": {
+		"CapacitorHttp": {
+			"enabled": true
+		}
+	},
+	"android": {
+		"allowMixedContent": true,
+		"webContentsDebuggingEnabled": true
+	},
+	"server": {
+		"allowNavigation": [
+			"ali-studio-server-wa1g.onrender.com"
+		]
+	}
+}
