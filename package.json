@@ -3,15 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "homepage": "https://ali-enterprises.vercel.app",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "type-check": "tsc --noEmit",
-    "cf:deploy": "wrangler deploy",
-    "cf:migrate": "wrangler d1 migrations apply db_1 --remote",
-    "cf:init": "wrangler deploy && wrangler d1 migrations apply db_1 --remote"
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@capacitor/android": "^6.2.1",
@@ -23,7 +19,6 @@
     "@emailjs/browser": "^4.4.1",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.7.0",
-    "firebase": "^10.7.1",
     "html2canvas": "^1.4.1",
     "html2pdf.js": "^0.14.0",
     "jspdf": "^4.1.0",

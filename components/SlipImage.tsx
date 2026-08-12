@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getTelegramPhotoUrl } from '../services/telegramService';
 
-const PROXY_SERVER = import.meta.env.DEV 
-  ? 'http://localhost:3001' 
-  : (import.meta.env.VITE_SOCKET_URL || 'https://ali-studio-server.onrender.com');
+// Production frontend and API share the Render origin.
+const PROXY_SERVER = import.meta.env.DEV
+  ? 'http://localhost:3001'
+  : window.location.origin;
 
 
 interface SlipImageProps {

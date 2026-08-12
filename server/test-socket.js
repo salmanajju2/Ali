@@ -1,6 +1,6 @@
 const { io } = require('socket.io-client');
 
-const socket = io('https://ali-studio-server-wa1g.onrender.com', {
+const socket = io('https://ali-ltyt.onrender.com', {
   transports: ['websocket', 'polling']
 });
 

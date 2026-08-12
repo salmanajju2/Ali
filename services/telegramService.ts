@@ -1,6 +1,8 @@
-const PROXY_SERVER = import.meta.env.DEV 
-  ? 'http://localhost:3001' 
-  : (import.meta.env.VITE_SOCKET_URL || 'https://ali-studio-server.onrender.com');
+// API and frontend are served by the same Render service in production.
+// Never route uploads through the retired external proxy host.
+const PROXY_SERVER = import.meta.env.DEV
+  ? 'http://localhost:3001'
+  : window.location.origin;
 
 
 export const BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN || '';

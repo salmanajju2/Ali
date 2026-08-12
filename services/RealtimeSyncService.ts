@@ -8,7 +8,12 @@ class RealtimeSyncService {
   private onStatusChange: ((connected: boolean) => void) | null = null;
 
   private getSocketUrl() {
-    return import.meta.env.VITE_SOCKET_URL || window.location.origin;
+    // Production frontend and Socket.IO are hosted by the same Render service.
+    // Ignoring an old VITE_SOCKET_URL prevents the client from reconnecting to
+    // the retired proxy host and showing an incorrect sync failure.
+    return import.meta.env.DEV
+      ? (import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001')
+      : window.location.origin;
   }
 
   constructor() {
