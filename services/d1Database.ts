@@ -1,4 +1,6 @@
 // PostgreSQL Database service via Backend API
+import { API_ORIGIN } from './apiConfig';
+
 export class D1DatabaseService {
   private static instance: D1DatabaseService;
   private baseUrl: string;
@@ -7,7 +9,7 @@ export class D1DatabaseService {
   private readonly FETCH_TIMEOUT_MS = 45000;
 
   private constructor() {
-    this.baseUrl = ''; // Relative path, same origin on Render
+    this.baseUrl = API_ORIGIN;
     console.log('🔗 PostgreSQL Backend API Service initialized.');
   }
 
