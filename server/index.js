@@ -7,6 +7,18 @@ const { Pool } = require('pg');
 
 const app = express();
 
+// 1. Middleware FIRST
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
+}));
+
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// 2. Database Connection
 const connectionString = process.env.DATABASE_URL;
 const pool = new Pool({
   connectionString,
@@ -31,7 +43,12 @@ pool.query(`
   )
 `).catch(err => console.error('Error creating transactions table:', err));
 
-// REST API for Transactions (Aiven PostgreSQL)
+// 3. API Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.send('Socket Server is running! 🚀');
+});
+
+// 4. REST API for Transactions (Aiven PostgreSQL)
 app.get('/api/transactions', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM transactions ORDER BY id DESC');
@@ -87,24 +104,8 @@ app.delete('/api/transactions/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-app.use(cors({
-  origin: true,
-  credentials: true,
-  methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
-}));
 
-
-// API Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.send('Socket Server is running! 🚀');
-});
-
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-
-
-// Proxy function for Telegram Messages
+// 5. Proxy & Utility Endpoints
 app.post('/telegram/sendMessage', async (req, res) => {
   const { botToken, chatId, message } = req.body;
   try {
@@ -125,7 +126,6 @@ app.post('/telegram/sendMessage', async (req, res) => {
   }
 });
 
-// Proxy function for Telegram Photos
 app.post('/telegram/sendPhoto', async (req, res) => {
   const { botToken, chatId, base64Photo } = req.body;
   try {
@@ -153,7 +153,6 @@ app.post('/telegram/sendPhoto', async (req, res) => {
   }
 });
 
-// Proxy function for Telegram File URLs
 app.get('/telegram/getFileUrl', async (req, res) => {
   const { botToken, fileId } = req.query;
   try {
@@ -171,8 +170,6 @@ app.get('/telegram/getFileUrl', async (req, res) => {
   }
 });
 
-// ✅ NEW: PDF/File Proxy — Telegram file fetch karke inline serve karo
-// Browser isey iframe mein dikhayega (download nahi hoga)
 app.get('/telegram/fetchFile', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'url param required' });
@@ -186,7 +183,6 @@ app.get('/telegram/fetchFile', async (req, res) => {
     const contentType = telegramRes.headers.get('content-type') || 'application/pdf';
     const buffer = await telegramRes.arrayBuffer();
 
-    // ✅ inline → browser preview karega (download nahi)
     res.set({
       'Content-Type': contentType,
       'Content-Disposition': 'inline',
@@ -200,28 +196,21 @@ app.get('/telegram/fetchFile', async (req, res) => {
   }
 });
 
-// Proxy function for Discord Webhook Uploads
+// Discord Upload Proxy
 app.post('/discord/upload', async (req, res) => {
   const { base64Data, fileName } = req.body;
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL || 'https://discord.com/api/webhooks/1517900238843547811/TuJRHWHrpVGsB6WuqVYOifwNihgrwWCfl0QTSN_uxsBxhEBm6sQ0osFZl9fxa44FORFS';
   
-  console.log(`[Backend Upload] Received file upload request. Name: ${fileName}`);
   try {
     const base64Parts = base64Data.split(',');
     const mime = base64Parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
     const base64Content = base64Parts[1];
     
-    // Convert base64 to buffer
     const buffer = Buffer.from(base64Content, 'base64');
-    console.log(`[Backend Upload] Converted base64 to buffer. Size: ${buffer.length} bytes, Mime: ${mime}`);
-    
-    // Create form-data
     const formData = new FormData();
     const blob = new Blob([buffer], { type: mime });
     formData.append('files[0]', blob, fileName || 'slip.jpg');
     
-    // Send to Discord (with wait=true to get the message details back)
-    console.log(`[Backend Upload] Sending file to Discord Webhook...`);
     const response = await fetch(`${webhookUrl}?wait=true`, {
       method: 'POST',
       body: formData,
@@ -229,104 +218,65 @@ app.post('/discord/upload', async (req, res) => {
     
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`[Backend Upload] Discord Webhook upload failed with status ${response.status}:`, errText);
       throw new Error(`Discord returned ${response.status}: ${errText}`);
     }
     
     const result = await response.json();
-    
-    // Return message ID and direct attachment URL
-    const messageId = result.id;
-    const attachmentUrl = result.attachments && result.attachments[0] ? result.attachments[0].url : '';
-    console.log(`[Backend Upload] Success! Created Discord Message ID: ${messageId}`);
-    
     res.json({
-      success: true,
-      messageId,
-      url: attachmentUrl
+      id: result.id,
+      url: result.attachments && result.attachments[0] ? result.attachments[0].url : ''
     });
   } catch (error) {
-    console.error('[Backend Upload] Error in proxy /discord/upload:', error);
+    console.error('Error in proxy /discord/upload:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Proxy function to get fresh Discord file URL
-app.get('/discord/getFileUrl', async (req, res) => {
-  const { messageId } = req.query;
-  if (!messageId) return res.status(400).json({ error: 'messageId required' });
-  
-  const webhookUrl = process.env.DISCORD_WEBHOOK_URL || 'https://discord.com/api/webhooks/1517900238843547811/TuJRHWHrpVGsB6WuqVYOifwNihgrwWCfl0QTSN_uxsBxhEBm6sQ0osFZl9fxa44FORFS';
-  console.log(`[Backend GetUrl] Request to get URL for messageId: ${messageId}`);
-  
-  try {
-    const response = await fetch(`${webhookUrl}/messages/${messageId}`);
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`[Backend GetUrl] Discord message fetch failed with status ${response.status}:`, errText);
-      return res.status(response.status).json({ error: `Discord returned ${response.status}: ${errText}` });
-    }
-    
-    const result = await response.json();
-    const attachmentUrl = result.attachments && result.attachments[0] ? result.attachments[0].url : '';
-    console.log(`[Backend GetUrl] Successfully retrieved attachment URL:`, attachmentUrl);
-    res.json({ url: attachmentUrl });
-  } catch (error) {
-    console.error('[Backend GetUrl] Error in proxy /discord/getFileUrl:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Proxy function to delete Discord message
 app.delete('/discord/deleteMessage/:messageId', async (req, res) => {
   const { messageId } = req.params;
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL || 'https://discord.com/api/webhooks/1517900238843547811/TuJRHWHrpVGsB6WuqVYOifwNihgrwWCfl0QTSN_uxsBxhEBm6sQ0osFZl9fxa44FORFS';
-  console.log(`[Backend Delete] Request to delete messageId: ${messageId}`);
   
   try {
-    const response = await fetch(`${webhookUrl}/messages/${messageId}`, {
-      method: 'DELETE',
-    });
+    const parts = webhookUrl.split('/');
+    const webhookId = parts[parts.length - 2];
+    const webhookToken = parts[parts.length - 1];
+    const deleteUrl = `https://discord.com/api/webhooks/${webhookId}/${webhookToken}/messages/${messageId}`;
     
+    const response = await fetch(deleteUrl, { method: 'DELETE' });
     if (response.ok || response.status === 204) {
-      console.log(`[Backend Delete] Message ${messageId} deleted successfully from Discord.`);
       res.json({ success: true });
     } else {
       const errText = await response.text();
-      console.error(`[Backend Delete] Discord message delete failed with status ${response.status}:`, errText);
-      res.status(response.status).json({ error: `Discord returned ${response.status}: ${errText}` });
+      res.status(response.status).json({ error: errText });
     }
   } catch (error) {
-    console.error('[Backend Delete] Error in proxy /discord/deleteMessage:', error);
+    console.error('Error in proxy /discord/deleteMessage:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-
+// 6. Socket.IO & Server Setup
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: true, // Allow all origins for easier sync across Vercel/APK
+    origin: true,
     methods: ["GET", "POST"],
     credentials: true,
     allowedHeaders: ["*"]
   },
   allowEIO3: true,
-  pingTimeout: 20000,    // Faster timeout detection (was 60000)
-  pingInterval: 10000,   // More frequent pings (was 25000)
-  transports: ['websocket', 'polling'], // WebSocket first for real-time
+  pingTimeout: 20000,
+  pingInterval: 10000,
+  transports: ['websocket', 'polling'],
   upgrade: true,
-  allowUpgrades: true,
-  perMessageDeflate: false // Disable compression for faster transmission
+  rememberUpgrade: true
 });
 
 io.on('connection', (socket) => {
   console.log('⚡ User connected:', socket.id);
 
-  // Jab koi device data bhej raha ho
   socket.on('transaction-updated', (data, ack) => {
     console.log('📢 Data received! Broadcasting to ALL devices...');
-    // Sabhi devices (including sender) ko data bhej do
     io.emit('trigger-sync', data);
     if (typeof ack === 'function') {
       ack({ ok: true });
@@ -338,10 +288,8 @@ io.on('connection', (socket) => {
   });
 });
 
-// Serve React static files in production
+// 7. Static Frontend & SPA Catch-all
 app.use(express.static(path.join(__dirname, '../dist')));
-
-// Catch-all route for SPA routing (React Router)
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
