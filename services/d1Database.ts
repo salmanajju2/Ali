@@ -10,17 +10,36 @@ export class D1DatabaseService {
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.FETCH_TIMEOUT_MS);
-    try {
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-      });
-      return response;
-    } finally {
-      clearTimeout(timeoutId);
+    // Render can briefly return a gateway error while an instance is waking up.
+    // Reads and API calls are retried once so a temporary network hiccup does not
+    // incorrectly leave the mobile UI in a permanent "Sync failed" state.
+    const maximumAttempts = 2;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.FETCH_TIMEOUT_MS);
+      try {
+        const response = await fetch(url, {
+          ...options,
+          signal: controller.signal,
+        });
+
+        const isTransientServerError = [502, 503, 504].includes(response.status);
+        if (!isTransientServerError || attempt === maximumAttempts) {
+          return response;
+        }
+      } catch (error) {
+        lastError = error;
+        if (attempt === maximumAttempts) throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      await new Promise(resolve => window.setTimeout(resolve, 1200));
     }
+
+    throw lastError instanceof Error ? lastError : new Error('Unable to reach the backend API.');
   }
 
   public static getInstance(): D1DatabaseService {
