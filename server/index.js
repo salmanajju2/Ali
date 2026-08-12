@@ -107,11 +107,47 @@ async function ensureTransactionSchema() {
       ADD COLUMN IF NOT EXISTS manual_date TEXT,
       ADD COLUMN IF NOT EXISTS bank TEXT,
       ADD COLUMN IF NOT EXISTS breakdown JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS is_synced BOOLEAN DEFAULT TRUE,
       ADD COLUMN IF NOT EXISTS is_settlement BOOLEAN DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS client_id TEXT,
       ADD COLUMN IF NOT EXISTS recorded_by TEXT,
       ADD COLUMN IF NOT EXISTS payment_method TEXT
   `);
+
+  // Older D1-era imports stored breakdown as TEXT. Convert the column once,
+  // preserving valid JSON and safely replacing malformed legacy values with {}.
+  const breakdownColumn = await pool.query(`
+    SELECT data_type
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'transactions' AND column_name = 'breakdown'
+  `);
+  if (breakdownColumn.rows[0]?.data_type !== 'jsonb') {
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION app_safe_breakdown_json(value TEXT)
+      RETURNS JSONB
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        IF value IS NULL OR btrim(value) = '' THEN
+          RETURN '{}'::jsonb;
+        END IF;
+        BEGIN
+          RETURN value::jsonb;
+        EXCEPTION WHEN OTHERS THEN
+          RETURN '{}'::jsonb;
+        END;
+      END;
+      $$
+    `);
+    await pool.query(`
+      ALTER TABLE transactions
+      ALTER COLUMN breakdown TYPE JSONB
+      USING app_safe_breakdown_json(breakdown::text)
+    `);
+    await pool.query(`DROP FUNCTION app_safe_breakdown_json(TEXT)`);
+  }
+  await pool.query(`ALTER TABLE transactions ALTER COLUMN breakdown SET DEFAULT '{}'::jsonb`);
+  await pool.query(`UPDATE transactions SET is_synced = TRUE WHERE is_synced IS NULL`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_users (
