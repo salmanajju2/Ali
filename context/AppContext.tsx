@@ -253,6 +253,15 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [d1Connected, setD1Connected] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
+
+  // Sync feedback is temporary. A past, transient network failure must not keep
+  // showing a red banner after later polling has restored connectivity.
+  useEffect(() => {
+    if (syncStatus !== 'success' && syncStatus !== 'error') return;
+    const timer = window.setTimeout(() => setSyncStatus('idle'), 5000);
+    return () => window.clearTimeout(timer);
+  }, [syncStatus]);
+
   // Track current user UID to detect account switch
   const currentUserUidRef = useRef<string | null>(null);
   const syncInProgressRef = useRef(false);
