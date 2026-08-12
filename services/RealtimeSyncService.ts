@@ -8,7 +8,7 @@ class RealtimeSyncService {
   private onStatusChange: ((connected: boolean) => void) | null = null;
 
   private getSocketUrl() {
-    return import.meta.env.VITE_SOCKET_URL || 'https://ali-studio-server-wa1g.onrender.com';
+    return import.meta.env.VITE_SOCKET_URL || window.location.origin;
   }
 
   constructor() {

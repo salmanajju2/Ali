@@ -807,7 +807,7 @@ const HistoryPage: React.FC = () => {
         </div>
       )}
 
-      <div className="fixed bottom-20 md:bottom-8 left-1/2 -translate-x-1/2 w-[calc(100%-1.5rem)] max-w-lg md:max-w-3xl p-3 sm:p-4 rounded-[2rem] sm:rounded-[2.5rem] flex justify-between items-center text-center no-print z-40 transition-all hover:scale-[1.01]" style={{background:'rgba(255,255,255,0.95)',backdropFilter:'blur(20px)',border:'1px solid #E0E7FF',boxShadow:'0 8px 40px rgba(99,102,241,0.10)'}}>
+      <div className="fixed bottom-28 md:bottom-8 left-1/2 -translate-x-1/2 w-[calc(100%-1.5rem)] max-w-lg md:max-w-3xl p-3 sm:p-4 rounded-[2rem] sm:rounded-[2.5rem] flex justify-between items-center text-center no-print z-40 transition-all hover:scale-[1.01]" style={{background:'rgba(255,255,255,0.95)',backdropFilter:'blur(20px)',border:'1px solid #E0E7FF',boxShadow:'0 8px 40px rgba(99,102,241,0.10)'}}>
         <div className="flex-1 min-w-0 flex flex-col items-center px-1">
           <p className="text-[9px] sm:text-[11px] font-black uppercase tracking-widest leading-none mb-1.5" style={{color:'#9CA3AF'}}>IN</p>
           <p className="text-[12px] sm:text-[15px] md:text-xl font-black text-emerald-600 tracking-tighter tabular-nums truncate w-full">₹{totals.totalCredit.toLocaleString('en-IN')}</p>
