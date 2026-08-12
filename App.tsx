@@ -12,7 +12,6 @@ import HistoryPage from './pages/HistoryPage';
 import VaultPage from './pages/VaultPage';
 import SummaryPage from './pages/SummaryPage';
 import AccountsPage from './pages/AccountsPage';
-import { SwipeGestureHandler } from './components/SwipeGestureHandler';
 import SingleBankHistoryPage from './pages/SingleBankHistoryPage';
 import UserProfilePage from './pages/UserProfilePage';
 import CompanyHistoryPage from './pages/CompanyHistoryPage';
@@ -65,9 +64,8 @@ const App: React.FC = () => {
                       <Header />
                     </div>
                     
-                    {/* Main content with responsive padding & Swipe Gesture Support */}
-                    <main className="flex-1 container mx-auto px-2 sm:px-6 lg:px-8 py-4 pb-28 md:pb-6 overflow-y-auto">
-                      <SwipeGestureHandler>
+                      {/* Main content with responsive padding. Side-swipe navigation is intentionally disabled. */}
+                      <main className="flex-1 container mx-auto px-2 sm:px-6 lg:px-8 py-4 pb-28 md:pb-6 overflow-y-auto">
                         <Routes>
                         <Route path="/" element={<TransactionPage />} />
                         <Route path="/history" element={<HistoryPage />} />
@@ -87,8 +85,7 @@ const App: React.FC = () => {
                         <Route path="/edit/:transactionId" element={<EditTransactionPage />} />
                         
                         <Route path="*" element={<Navigate to="/" replace />} />
-                      </Routes>
-                      </SwipeGestureHandler>
+                        </Routes>
                     </main>
                     
                     {/* Bottom Navigation - Only on mobile/tablet */}
