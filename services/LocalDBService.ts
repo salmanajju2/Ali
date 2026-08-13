@@ -2,8 +2,6 @@ import { Transaction } from '../types';
 
 const DB_NAME = 'ali_enterprises_db';
 const STORE_NAME = 'transactions';
-const DB_VERSION = 2; // Version 2: date index added for faster sorting
-
 class IndexedDBService {
   private static instance: IndexedDBService;
   private db: IDBDatabase | null = null;
@@ -35,7 +33,11 @@ class IndexedDBService {
     if (this.db) return this.db;
 
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      // Version number explicitly pass mat karo. Purane APK ya web build ne agar
+      // is database ko higher version par upgrade kiya ho, lower version request
+      // `VersionError` deta hai aur edit/save block ho jata hai. Current existing
+      // schema ko open karna safe hai; new database par onupgradeneeded store banata hai.
+      const request = indexedDB.open(DB_NAME);
 
       request.onupgradeneeded = (event: any) => {
         const db = event.target.result;

@@ -973,11 +973,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       }
     });
 
-    // Polling fallback: Android background/network transition ke dauran socket
-    // disconnected ho toh 15 seconds mein authoritative data refresh ho jaata hai.
+    // Polling fallback: Android WebView socket temporarily disconnect ho toh bhi
+    // website ki entry APK mein lagbhag turant (max 3 seconds) aa jaye.
     const refreshInterval = window.setInterval(() => {
-      if (!realtimeSync.isSocketConnected()) void refreshAllFromD1(false);
-    }, 15000);
+      if (!realtimeSync.isSocketConnected()) void refreshAllFromD1(true);
+    }, 3000);
 
     const handleOnline = () => {
       console.log('📶 Device back online. Triggering sync...');

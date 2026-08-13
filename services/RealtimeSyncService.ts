@@ -21,6 +21,12 @@ class RealtimeSyncService {
 
   public setSyncCallback(callback: (data?: any) => Promise<void>) {
     this.syncCallback = callback;
+
+    // AppContext callback socket connection ke baad register ho sakta hai. Agar
+    // connect event pehle fire ho gaya, toh initial server refresh miss nahi hona chahiye.
+    if (this.socket?.connected) {
+      void this.syncCallback({ action: 'sync', reason: 'callback-registered' });
+    }
   }
 
   public setPollCallback(callback: () => Promise<void>) {
@@ -99,7 +105,7 @@ class RealtimeSyncService {
   }
 
   private lastPollTime = 0;
-  private readonly POLL_DEBOUNCE_MS = 5000; // 5 second debounce
+  private readonly POLL_DEBOUNCE_MS = 1500; // fast foreground refresh without repeated storms
 
   private registerCapacitorLifecycle() {
     setTimeout(() => {
