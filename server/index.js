@@ -276,6 +276,21 @@ app.post('/api/auth/logout', async (req, res) => {
 });
 
 // 5. REST API for Transactions (Aiven PostgreSQL)
+// Only this server-side helper publishes transaction mutations. The REST route
+// calls it after PostgreSQL returns a committed row (or confirmed deletion), so
+// an APK or web client can never broadcast an unconfirmed local mutation.
+function publishTransactionEvent(action, payload = {}) {
+  const event = {
+    eventId: randomUUID(),
+    action,
+    emittedAt: new Date().toISOString(),
+    ...payload,
+  };
+  io.emit('trigger-sync', event);
+  console.log(`📡 Socket.IO ${action} event published: ${event.eventId}`);
+  return event;
+}
+
 app.get('/api/transactions', async (_req, res) => {
   await withDatabase(res, async () => {
     const result = await pool.query(`
@@ -318,7 +333,7 @@ app.post('/api/transactions', async (req, res) => {
     const transaction = result.rows[0];
     // The REST mutation is authoritative. Broadcast only after Aiven PostgreSQL
     // has returned the committed row, so every client receives the same data.
-    io.emit('trigger-sync', { action: 'add', transaction });
+    publishTransactionEvent('add', { transaction });
     res.status(201).json({ id: transaction.id, ok: true });
   });
 });
@@ -353,7 +368,7 @@ app.put('/api/transactions/:id', async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Transaction not found.' });
     const transaction = result.rows[0];
     // Broadcast the committed PostgreSQL row only after a successful update.
-    io.emit('trigger-sync', { action: 'update', transaction });
+    publishTransactionEvent('update', { transaction });
     res.json({ id: transaction.id, ok: true });
   });
 });
@@ -369,7 +384,7 @@ app.delete('/api/transactions/:id', async (req, res) => {
 
     // Broadcast only after PostgreSQL confirms the deletion. This avoids the old
     // race where another device refreshed before the record was actually removed.
-    io.emit('trigger-sync', { action: 'delete', ids: [String(id)] });
+    publishTransactionEvent('delete', { ids: [String(id)] });
     res.json({ ok: true });
   });
 });
@@ -565,18 +580,47 @@ const io = new Server(server, {
 });
 
 io.on('connection', (socket) => {
-  console.log('⚡ User connected:', socket.id);
+  console.log('⚡ Socket.IO client connected:', socket.id);
 
+  // Transaction writes must always go through the REST API. This compatibility
+  // handler deliberately refuses client-originated add/update/delete broadcasts:
+  // otherwise another device could receive optimistic data before Aiven confirms it.
   socket.on('transaction-updated', (data, ack) => {
-    console.log('📢 Data received! Broadcasting to ALL devices...');
-    io.emit('trigger-sync', data);
+    if (data?.action === 'sync-status-check' && typeof data?.testId === 'string') {
+      const diagnosticEvent = {
+        action: 'sync-status-check',
+        testId: data.testId,
+        source: 'server',
+        emittedAt: new Date().toISOString(),
+      };
+      socket.broadcast.emit('trigger-sync', diagnosticEvent);
+      if (typeof ack === 'function') ack({ ok: true, accepted: true, diagnostic: true });
+      return;
+    }
+
+    console.warn(`Ignored client-originated transaction event from ${socket.id}; use the REST API.`);
     if (typeof ack === 'function') {
-      ack({ ok: true });
+      ack({
+        ok: true,
+        accepted: false,
+        reason: 'Transaction realtime events are emitted by the server after PostgreSQL confirmation.',
+      });
     }
   });
 
-  socket.on('disconnect', () => {
-    console.log('❌ User disconnected');
+  socket.on('sync-status', (ack) => {
+    if (typeof ack === 'function') {
+      ack({
+        ok: true,
+        connected: true,
+        socketId: socket.id,
+        serverTime: new Date().toISOString(),
+      });
+    }
+  });
+
+  socket.on('disconnect', (reason) => {
+    console.log(`❌ Socket.IO client disconnected: ${socket.id} (${reason})`);
   });
 });
 
