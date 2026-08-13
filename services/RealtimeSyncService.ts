@@ -69,6 +69,11 @@ class RealtimeSyncService {
     this.socket.on('connect', () => {
       console.log('Connected to Socket Server.');
       if (this.onStatusChange) this.onStatusChange(true);
+
+      // A device can miss an event while Android WebView reconnects after a
+      // background/network transition. Ask AppContext for one authoritative
+      // PostgreSQL refresh as soon as the socket is available again.
+      void this.syncCallback?.({ action: 'sync', reason: 'socket-connected' });
     });
 
     this.socket.on('trigger-sync', async (data: any) => {

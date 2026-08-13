@@ -832,10 +832,29 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     // App foreground mein forced full-refresh (cooldown bypass)
     realtimeSync.setPollCallback(() => refreshAllFromD1(true));
 
+    // Socket event se direct UI update instant hota hai. Is small delayed full
+    // refresh se Android WebView reconnect/missed-event edge cases bhi Aiven ke
+    // authoritative data se recover ho jaate hain.
+    let realtimeRefreshTimer: number | undefined;
+    const scheduleAuthoritativeRealtimeRefresh = () => {
+      if (realtimeRefreshTimer !== undefined) window.clearTimeout(realtimeRefreshTimer);
+      realtimeRefreshTimer = window.setTimeout(() => {
+        realtimeRefreshTimer = undefined;
+        void refreshAllFromD1(true);
+      }, 350);
+    };
+
     // 2. Socket-based instant update (when connected)
     realtimeSync.setSyncCallback(async (remoteData: any) => {
       if (remoteData && remoteData.action) {
         console.log(`📡 Instant update received: ${remoteData.action}`);
+
+        // Reconnect par ya manual reconciliation par full database refresh karo.
+        // Yeh missed background events ko APK mein wapas le aata hai.
+        if (remoteData.action === 'sync') {
+          scheduleAuthoritativeRealtimeRefresh();
+          return;
+        }
 
         if (remoteData.action === 'add' && remoteData.transaction) {
           const incomingTx = { ...remoteData.transaction, isSynced: true };
@@ -944,12 +963,21 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           } catch (e) { console.error('LocalDB Delete Error:', e); }
           // ✅ No full D1 refresh needed — socket already sent correct IDs to remove
         }
+
+        // Direct socket state merge ke baad Aiven database se reconcile karo.
+        // Isse website se banayi hui entry APK list mein reliably aa jaati hai,
+        // even if Android WebView ne background mein koi event miss kiya ho.
+        if (['add', 'update', 'delete'].includes(remoteData.action)) {
+          scheduleAuthoritativeRealtimeRefresh();
+        }
       }
     });
 
-    // Polling: fallback for when WebSocket is disconnected or in background
-    // 60 seconds interval — reduces unnecessary server calls
-    const refreshInterval = window.setInterval(() => refreshAllFromD1(false), 60000);
+    // Polling fallback: Android background/network transition ke dauran socket
+    // disconnected ho toh 15 seconds mein authoritative data refresh ho jaata hai.
+    const refreshInterval = window.setInterval(() => {
+      if (!realtimeSync.isSocketConnected()) void refreshAllFromD1(false);
+    }, 15000);
 
     const handleOnline = () => {
       console.log('📶 Device back online. Triggering sync...');
@@ -959,6 +987,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
     return () => {
       window.clearInterval(refreshInterval);
+      if (realtimeRefreshTimer !== undefined) window.clearTimeout(realtimeRefreshTimer);
       window.removeEventListener('online', handleOnline);
     };
   // recalculate functions useMemo se hain — yahan dep nahi chahiye
@@ -1293,8 +1322,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
     // Vault and Balances update automatically via useMemo when allTransactions changes
 
-    // BACKGROUND mein Telegram upload, D1 sync aur Socket notification
-    (async () => {
+    // Save flow tabhi successful mana jayega jab PostgreSQL PUT confirm ho.
+    // Edit page is promise ko await karta hai, isliye false-success redirect nahi hoga.
+    await (async () => {
       try {
         // Working copy banao — original React state object ko mutate mat karo.
         let txToProcess: Transaction = { ...optimisticUpdate };
@@ -1360,7 +1390,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           await localDB.saveTransaction(unsyncedUpdate);
           setAllTransactions(prev => prev.map(tx => tx.id === unsyncedUpdate.id ? unsyncedUpdate : tx));
           setD1Connected(false);
-          return;
+          throw new Error('Transaction update PostgreSQL mein save nahi hua. Please retry.');
         }
 
         if (!txToBroadcast) return;
@@ -1387,7 +1417,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           previousTransaction: capturedOriginal
         });
       } catch (error) {
-        console.error(`❌ Background update failed:`, error);
+        console.error(`❌ Transaction update failed:`, error);
+        throw error;
       }
     })();
   }, [d1Connected]);
@@ -1406,9 +1437,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     // STEP 3: Database deletion ke baad server khud Socket.IO event broadcast karega.
     // Isse kisi dusre device ko deletion event tabhi milta hai jab PostgreSQL mein
     // record successfully remove ho chuka ho; pehle ka early broadcast stale web data la sakta tha.
-    // STEP 4: BACKGROUND mein LocalDB + PostgreSQL + Telegram delete
-
-    (async () => {
+    // Delete tabhi successful mana jayega jab har real PostgreSQL row remove ho.
+    // History page is promise ko await karta hai, isliye failed delete silently hide nahi hoga.
+    await (async () => {
       try {
         // LocalDB se delete (hamesha — offline bhi)
         for (const id of ids) {
@@ -1439,8 +1470,26 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
         }
 
-        // temp_ IDs: local only the, koi D1 record nahi — safe to remove from pending
+        // temp_ IDs: local only the, koi PostgreSQL record nahi — safe to remove from pending.
         const tempIds = ids.filter(id => id.startsWith('temp_') || id.startsWith('recovered_'));
+        const failedRealIds = realIds.filter(id => !confirmedDeletedIds.includes(id));
+
+        if (failedRealIds.length > 0) {
+          // UI aur IndexedDB mein failed rows restore karo. Isse user ko false deletion
+          // nahi dikhegi aur wo PostgreSQL mutation retry kar sakta hai.
+          const failedTransactions = transactionsToDelete.filter(tx => failedRealIds.includes(tx.id));
+          for (const tx of failedTransactions) {
+            await localDB.saveTransaction({ ...tx, isSynced: true });
+          }
+          setAllTransactions(prev => sortTransactionsByDate([
+            ...prev.filter(tx => !failedRealIds.includes(tx.id)),
+            ...failedTransactions.map(tx => ({ ...tx, isSynced: true }))
+          ]));
+          removePendingDeletes(failedRealIds);
+          setD1Connected(false);
+          throw new Error(`Transaction delete PostgreSQL mein confirm nahi hua: ${failedRealIds.join(', ')}`);
+        }
+
         removePendingDeletes([...confirmedDeletedIds, ...tempIds]);
 
         // Telegram media delete (slow — last mein)
@@ -1456,7 +1505,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
         }
       } catch (error) {
-        console.error(`❌ Background delete failed:`, error);
+        console.error(`❌ Transaction delete failed:`, error);
+        throw error;
       }
     })();
   }, []);
