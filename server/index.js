@@ -301,7 +301,11 @@ app.post('/api/transactions', async (req, res) => {
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13::jsonb, TRUE, $14, $15
-      ) RETURNING id::text AS id
+      ) RETURNING
+        id::text AS id, date, manual_date AS "manualDate", amount::float8 AS amount,
+        type, company, person, notes, payment_method AS "paymentMethod", location,
+        recorded_by AS "recordedBy", bank, slip, breakdown,
+        is_synced AS "isSynced", is_settlement AS "isSettlement", client_id AS "clientId"
     `;
     const values = [
       tx.date || new Date().toISOString(), tx.manualDate || null, Number(tx.amount) || 0,
@@ -311,7 +315,11 @@ app.post('/api/transactions', async (req, res) => {
       Boolean(tx.isSettlement), tx.clientId || null
     ];
     const result = await pool.query(query, values);
-    res.status(201).json({ id: result.rows[0].id, ok: true });
+    const transaction = result.rows[0];
+    // The REST mutation is authoritative. Broadcast only after Aiven PostgreSQL
+    // has returned the committed row, so every client receives the same data.
+    io.emit('trigger-sync', { action: 'add', transaction });
+    res.status(201).json({ id: transaction.id, ok: true });
   });
 });
 
@@ -328,7 +336,11 @@ app.put('/api/transactions/:id', async (req, res) => {
         notes=$7, payment_method=$8, location=$9, recorded_by=$10, bank=$11,
         slip=$12, breakdown=$13::jsonb, is_settlement=$14, client_id=$15
       WHERE id=$16
-      RETURNING id::text AS id
+      RETURNING
+        id::text AS id, date, manual_date AS "manualDate", amount::float8 AS amount,
+        type, company, person, notes, payment_method AS "paymentMethod", location,
+        recorded_by AS "recordedBy", bank, slip, breakdown,
+        is_synced AS "isSynced", is_settlement AS "isSettlement", client_id AS "clientId"
     `;
     const values = [
       tx.date || new Date().toISOString(), tx.manualDate || null, Number(tx.amount) || 0,
@@ -339,7 +351,10 @@ app.put('/api/transactions/:id', async (req, res) => {
     ];
     const result = await pool.query(query, values);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Transaction not found.' });
-    res.json({ id: result.rows[0].id, ok: true });
+    const transaction = result.rows[0];
+    // Broadcast the committed PostgreSQL row only after a successful update.
+    io.emit('trigger-sync', { action: 'update', transaction });
+    res.json({ id: transaction.id, ok: true });
   });
 });
 
