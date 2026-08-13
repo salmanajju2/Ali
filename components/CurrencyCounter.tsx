@@ -72,7 +72,9 @@ const CurrencyCounter: React.FC<CurrencyCounterProps> = ({ value, onChange }) =>
             <input
               id={`denom-${denom}`}
               type="text"
-              inputMode="text"
+              inputMode="decimal"
+              pattern="[+-]?[0-9]*"
+              enterKeyHint="done"
               value={visibleValue}
               placeholder=""
               onChange={(e) => handleInputChange(denom, e.target.value)}
