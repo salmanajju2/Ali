@@ -267,9 +267,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const syncInProgressRef = useRef(false);
   const lastFetchTimeRef = useRef<number>(0);
   const allTransactionsRef = useRef<Transaction[]>([]);
-  // ✅ FIX: Track recently updated IDs — polling inhe overwrite na kare
-  // updateTransaction ke baad yeh set mein add hota hai
-  // Next full refresh ke baad clear ho jaata hai
+  // Track in-flight edits separately from new offline transactions. A real ID with
+  // isSynced:false must be PUT, never POSTed as a duplicate during background sync.
+  const pendingUpdateIdsRef = useRef<Set<string>>(new Set<string>());
+  // Track recently confirmed edits until one authoritative full refresh completes.
   const recentlyUpdatedIdsRef = useRef<Set<string>>(new Set<string>());
   useEffect(() => {
     allTransactionsRef.current = allTransactions;
@@ -400,6 +401,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           const updated = await d1Database.updateTransaction(localTx);
           if (updated) {
             localTx.isSynced = true;
+            pendingUpdateIdsRef.current.delete(localTx.id);
+            recentlyUpdatedIdsRef.current.add(localTx.id);
             await localDB.saveTransaction(localTx);
             // ✅ UI mein bhi synced mark karo
             setAllTransactions(prev => prev.map(tx => tx.id === localTx.id ? { ...tx, isSynced: true } : tx));
@@ -467,6 +470,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           // Local priority: pending (editing) + recently updated (D1 might be stale)
           const localPriorityIds = new Set([
             ...pendingInMemory.map(tx => tx.id),
+            ...pendingUpdateIdsRef.current,
             ...recentlyUpdatedIdsRef.current,
           ]);
           const filteredServerData = syncedFromServer.filter(tx => !localPriorityIds.has(tx.id));
@@ -666,11 +670,28 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       try {
         const localTransactions = await localDB.getTransactions();
 
-        // Auto-push unsynced local transactions to D1 in background
+        // Push unsynced local records. Existing server IDs are edits and must use PUT;
+        // only temporary/recovered IDs represent genuinely new transactions that need POST.
         const unsyncedLocal = localTransactions.filter(tx => !tx.isSynced);
         if (unsyncedLocal.length > 0) {
-          console.log(`📤 Auto-syncing ${unsyncedLocal.length} offline transactions...`);
+          console.log(`📤 Auto-syncing ${unsyncedLocal.length} offline transaction(s)...`);
           for (const tx of unsyncedLocal) {
+            const isExistingServerTransaction = !tx.id.startsWith('temp_') && !tx.id.startsWith('recovered_');
+
+            if (isExistingServerTransaction) {
+              const updated = await d1Database.updateTransaction({ ...tx, isSynced: true });
+              if (updated) {
+                const syncedTx = { ...tx, isSynced: true };
+                await localDB.saveTransaction(syncedTx);
+                setAllTransactions(prev => prev.map(t => t.id === tx.id ? syncedTx : t));
+                pendingUpdateIdsRef.current.delete(tx.id);
+                recentlyUpdatedIdsRef.current.add(tx.id);
+                realtimeSync.notifyUpdate({ action: 'update', transaction: syncedTx });
+                console.log(`✅ Auto-synced transaction update: ${tx.id}`);
+              }
+              continue;
+            }
+
             const oldId = tx.id;
             const newServerId = await d1Database.addTransaction(tx);
             if (newServerId) {
@@ -739,6 +760,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             // pendingInMemory ke IDs bhi protect karo (concurrent update mid-flight)
             const localPriorityIds = new Set([
               ...pendingInMemory.map(tx => tx.id),
+              ...pendingUpdateIdsRef.current,
               ...recentlyUpdatedIds,          // recently updated — local is fresher
             ]);
 
@@ -872,7 +894,22 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
 
           const previousTx = remoteData.previousTransaction;
+          let ignoredBecauseLocalUpdatePending = false;
           setAllTransactions(prev => {
+            // A delayed socket payload must never replace an optimistic local edit that
+            // is still waiting for its own PostgreSQL PUT acknowledgement.
+            const localPendingEdit = prev.find(tx =>
+              (tx.id === incomingTx.id || (previousTx?.id && tx.id === previousTx.id)) && !tx.isSynced
+            );
+            const recentlyConfirmedLocalEdit =
+              pendingUpdateIdsRef.current.has(incomingTx.id) ||
+              recentlyUpdatedIdsRef.current.has(incomingTx.id);
+            if (localPendingEdit || recentlyConfirmedLocalEdit) {
+              ignoredBecauseLocalUpdatePending = true;
+              console.log(`🛡️ Socket update ignored for ${incomingTx.id}; local edit is pending.`);
+              return prev;
+            }
+
             let found = false;
             const next = prev.map(tx => {
               if (tx.id === incomingTx.id || (previousTx?.id && tx.id === previousTx.id)) {
@@ -892,8 +929,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             next.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
             return next;
           });
-          // ✅ BUG FIX: Deleted transaction LocalDB mein wapas mat save karo
-          if (!pendingDeleteIdsRef.current.has(incomingTx.id)) {
+          // Never persist a delayed socket payload over a local pending edit or a deleted row.
+          if (!ignoredBecauseLocalUpdatePending && !pendingDeleteIdsRef.current.has(incomingTx.id)) {
             try { await localDB.saveTransaction(incomingTx); } catch (e) { console.error('LocalDB Update Error:', e); }
           }
         }
@@ -1229,23 +1266,26 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   }, [isSubmitting, d1Connected]);
 
   const updateTransaction = useCallback(async (updatedTransaction: Transaction & { manualDate?: string }) => {
-    if (updatedTransaction.manualDate) {
-      updatedTransaction.date = new Date(updatedTransaction.manualDate).toISOString();
-    }
+    const normalizedTransaction = updatedTransaction.manualDate
+      ? { ...updatedTransaction, date: new Date(updatedTransaction.manualDate).toISOString() }
+      : { ...updatedTransaction };
 
-    // ✅ FIX: LocalDB mein PEHLE save karo (isSynced: false mark karke)
-    // Pehle UI pehle update hoti thi — agar background fail hota toh LocalDB stale rehta
+    // An edit remains local-priority until PostgreSQL confirms its write. This prevents a
+    // polling snapshot or a delayed socket event from temporarily restoring the old row.
+    const optimisticUpdate: Transaction = { ...normalizedTransaction, isSynced: false };
+    pendingUpdateIdsRef.current.add(optimisticUpdate.id);
+
     try {
-      await localDB.saveTransaction({ ...updatedTransaction, isSynced: false });
+      await localDB.saveTransaction(optimisticUpdate);
     } catch (e) {
       console.warn('⚠️ LocalDB pre-save failed on update:', e);
     }
 
-    // UI update (LocalDB save ke baad)
+    // UI update (LocalDB save ke baad). Keep isSynced:false until the PUT succeeds.
     let capturedOriginal: Transaction | undefined;
     setAllTransactions(prev => {
-      capturedOriginal = prev.find(tx => tx.id === updatedTransaction.id);
-      const updated = prev.map(tx => tx.id === updatedTransaction.id ? updatedTransaction : tx)
+      capturedOriginal = prev.find(tx => tx.id === optimisticUpdate.id);
+      const updated = prev.map(tx => tx.id === optimisticUpdate.id ? optimisticUpdate : tx)
         .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
       return updated;
     });
@@ -1255,9 +1295,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     // BACKGROUND mein Telegram upload, D1 sync aur Socket notification
     (async () => {
       try {
-        // ✅ FIX: Working copy banao — original updatedTransaction ko mutate mat karo
-        // Direct state object mutation = React bugs + stale closure issues
-        let txToProcess = { ...updatedTransaction };
+        // Working copy banao — original React state object ko mutate mat karo.
+        let txToProcess: Transaction = { ...optimisticUpdate };
 
         let oldMessageIdToDelete: string | undefined;
 
@@ -1307,7 +1346,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             success = true;
           }
         } else {
-          success = await d1Database.updateTransaction(txToProcess);
+          // The server receives the final synchronized record, while the UI/cache stays
+          // unsynced until this request has acknowledged successfully.
+          success = await d1Database.updateTransaction({ ...txToProcess, isSynced: true });
           if (success) {
             txToBroadcast = { ...txToProcess, isSynced: true };
           }
@@ -1329,12 +1370,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // Kyunki polling mein pendingInMemory = isSynced:false wale transactions hain
         // Ab yeh transaction synced hai toh polling usse server data se replace karegi (correctly)
         setAllTransactions(prev => prev.map(tx =>
-          tx.id === updatedTransaction.id || tx.id === txToBroadcast!.id ? txToBroadcast! : tx
+          tx.id === optimisticUpdate.id || tx.id === txToBroadcast!.id ? txToBroadcast! : tx
         ));
 
         // ✅ FIX: Is updated ID ko track karo — next polling mein full refresh hogi
         // Incremental sync (getNewTransactions) updated records nahi pakdti — isliye force full
         recentlyUpdatedIdsRef.current.add(txToBroadcast.id);
+        pendingUpdateIdsRef.current.delete(txToBroadcast.id);
         // Cooldown reset karo taaki next polling turant full refresh kare
         lastFetchTimeRef.current = 0;
 
