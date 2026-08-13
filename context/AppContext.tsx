@@ -242,6 +242,63 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     if (pendingDeleteIdsRef.current.size === 0) return list;
     return list.filter(tx => !pendingDeleteIdsRef.current.has(tx.id));
   };
+
+  // A pending ID is a durable delete intent, not just a UI filter. It remains in
+  // localStorage after the APK is closed and is replayed once a connection returns.
+  const pendingDeleteFlushInProgressRef = useRef(false);
+  const flushPendingDeletes = useCallback(async () => {
+    const queuedIds = [...pendingDeleteIdsRef.current];
+    if (queuedIds.length === 0) {
+      return { confirmedIds: [] as string[], pendingIds: [] as string[] };
+    }
+
+    // A temporary/recovered transaction never reached PostgreSQL, so deleting its
+    // local copy completes the operation without a remote request.
+    const localOnlyIds = queuedIds.filter(id => id.startsWith('temp_') || id.startsWith('recovered_'));
+    if (localOnlyIds.length > 0) {
+      removePendingDeletes(localOnlyIds);
+    }
+
+    const realIds = queuedIds.filter(id => !id.startsWith('temp_') && !id.startsWith('recovered_'));
+    if (realIds.length === 0) {
+      return { confirmedIds: localOnlyIds, pendingIds: [] as string[] };
+    }
+
+    // Never make an offline delete wait on long network timeouts. The durable queue
+    // is retained and the online/reconnect handlers invoke this helper again.
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      console.log(`📴 ${realIds.length} delete(s) safely queued until the device is back online.`);
+      return { confirmedIds: localOnlyIds, pendingIds: realIds };
+    }
+
+    if (pendingDeleteFlushInProgressRef.current) {
+      return { confirmedIds: [] as string[], pendingIds: realIds };
+    }
+
+    pendingDeleteFlushInProgressRef.current = true;
+    const confirmedIds: string[] = [];
+    try {
+      console.log(`📤 Replaying ${realIds.length} queued deletion(s) to Aiven PostgreSQL...`);
+      for (const id of realIds) {
+        const deleted = await aivenDatabase.deleteTransaction(id);
+        if (deleted) {
+          confirmedIds.push(id);
+          console.log(`✅ Queued Aiven PostgreSQL delete confirmed: ${id}`);
+        } else {
+          console.warn(`⚠️ Queued Aiven PostgreSQL delete still pending: ${id}`);
+        }
+      }
+
+      if (confirmedIds.length > 0) {
+        removePendingDeletes(confirmedIds);
+      }
+
+      const pendingIds = realIds.filter(id => !confirmedIds.includes(id));
+      return { confirmedIds: [...localOnlyIds, ...confirmedIds], pendingIds };
+    } finally {
+      pendingDeleteFlushInProgressRef.current = false;
+    }
+  }, []);
   const [companyNames, setCompanyNames] = useState<string[]>(() => {
     const saved = localStorage.getItem('companyNames');
     return saved ? JSON.parse(saved) : defaultCompanyNames;
@@ -386,6 +443,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     setSyncStatus('syncing');
     try {
       console.log('🔄 Starting manual sync with Aiven PostgreSQL...');
+
+      const queuedDeleteResult = await flushPendingDeletes();
+      if (queuedDeleteResult.confirmedIds.length > 0) {
+        console.log(`✅ Manual sync confirmed ${queuedDeleteResult.confirmedIds.length} queued deletion(s).`);
+      }
 
       const localTransactions = await localDB.getTransactions();
       console.log(`💿 Loaded ${localTransactions.length} local transactions for sync.`);
@@ -570,9 +632,14 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       try {
         // Step 1: LocalDB se turant load karo
         console.log('⚡ Loading from LocalDB...');
+        const queuedDeleteResult = await flushPendingDeletes();
+        if (queuedDeleteResult.confirmedIds.length > 0) {
+          console.log(`✅ App-open sync confirmed ${queuedDeleteResult.confirmedIds.length} queued deletion(s).`);
+        }
+
         const localTransactions = await localDB.getTransactions();
         if (localTransactions && localTransactions.length > 0) {
-          const sortedLocal = [...localTransactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+          const sortedLocal = sortTransactionsByDate(filterDeletedIds(localTransactions));
           setAllTransactions(sortedLocal);
           console.log(`✅ LocalDB se ${sortedLocal.length} transactions loaded.`);
         }
@@ -631,7 +698,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         } else {
           console.log('ℹ️ No new updates from Aiven PostgreSQL. Using local data.');
           if (localTransactions.length > 0) {
-            const finalSorted = sortTransactionsByDate(localTransactions);
+            const finalSorted = sortTransactionsByDate(filterDeletedIds(localTransactions));
             setAllTransactions(finalSorted);
           }
         }
@@ -668,6 +735,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       lastFetchTimeRef.current = now;
 
       try {
+        const queuedDeleteResult = await flushPendingDeletes();
         const localTransactions = await localDB.getTransactions();
 
         // Push unsynced local records. Existing server IDs are edits and must use PUT;
@@ -719,7 +787,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // Warna mergedList build hone tak IDs already clear ho jaate hain
         const recentlyUpdatedIds = new Set(recentlyUpdatedIdsRef.current);
         const hasRecentUpdates = recentlyUpdatedIds.size > 0;
-        const shouldForceFull = force || hasRecentUpdates;
+        const shouldForceFull = force || hasRecentUpdates || queuedDeleteResult.confirmedIds.length > 0;
 
         if (hasRecentUpdates) {
           console.log(`🔄 ${recentlyUpdatedIds.size} recently updated transaction(s) detected — forcing full Aiven PostgreSQL refresh.`);
@@ -976,7 +1044,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     // Polling fallback: Android WebView socket temporarily disconnect ho toh bhi
     // website ki entry APK mein lagbhag turant (max 3 seconds) aa jaye.
     const refreshInterval = window.setInterval(() => {
-      if (!realtimeSync.isSocketConnected()) void refreshAllFromAiven(true);
+      // A connected socket does not guarantee that an earlier HTTP DELETE reached
+      // PostgreSQL. Keep replaying any durable delete intent until the server confirms it.
+      if (pendingDeleteIdsRef.current.size > 0 || !realtimeSync.isSocketConnected()) {
+        void refreshAllFromAiven(true);
+      }
     }, 3000);
 
     const handleOnline = () => {
@@ -1424,92 +1496,52 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   }, [databaseConnected]);
 
   const deleteTransactionsByIds = useCallback(async (ids: string[]) => {
-    const idsSet = new Set(ids);
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length === 0) return;
+
+    const idsSet = new Set(uniqueIds);
     const transactionsToDelete = allTransactionsRef.current.filter(tx => idsSet.has(tx.id));
 
-    // ✅ STEP 1: Pending deletes mein add karo SABSE PEHLE
-    // Yeh ensure karta hai ki koi bhi sync inhe wapas na laye
-    addPendingDeletes(ids);
-
-    // STEP 2: UI turant update karo
+    // Persist intent before changing the UI. This queue survives a refresh, APK close,
+    // and temporary network failure, and prevents a server refresh from resurrecting rows.
+    addPendingDeletes(uniqueIds);
     setAllTransactions(prev => prev.filter(tx => !idsSet.has(tx.id)));
 
-    // STEP 3: Database deletion ke baad server khud Socket.IO event broadcast karega.
-    // Isse kisi dusre device ko deletion event tabhi milta hai jab PostgreSQL mein
-    // record successfully remove ho chuka ho; pehle ka early broadcast stale web data la sakta tha.
-    // Delete tabhi successful mana jayega jab har real PostgreSQL row remove ho.
-    // History page is promise ko await karta hai, isliye failed delete silently hide nahi hoga.
-    await (async () => {
-      try {
-        // LocalDB se delete (hamesha — offline bhi)
-        for (const id of ids) {
-          await localDB.deleteTransaction(id);
-        }
-
-        // Aiven PostgreSQL se delete — retry ke saath (3 attempts)
-        const realIds = ids.filter(id => !id.startsWith('temp_') && !id.startsWith('recovered_'));
-        const confirmedDeletedIds: string[] = [];
-
-        for (const id of realIds) {
-          let deleted = false;
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-              const ok = await aivenDatabase.deleteTransaction(id);
-              if (ok) { deleted = true; break; }
-            } catch (e) {
-              console.warn(`⚠️ Aiven PostgreSQL delete attempt ${attempt} failed for ${id}:`, e);
-            }
-            if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
-          }
-          if (deleted) {
-            confirmedDeletedIds.push(id);
-            console.log(`✅ Aiven PostgreSQL delete confirmed: ${id}`);
-          } else {
-            console.error(`❌ Aiven PostgreSQL delete failed after 3 attempts for ${id} — will retry on next sync`);
-            // pendingDeleteIds mein rakho — next sync mein filter rahega
-          }
-        }
-
-        // temp_ IDs: local only the, koi PostgreSQL record nahi — safe to remove from pending.
-        const tempIds = ids.filter(id => id.startsWith('temp_') || id.startsWith('recovered_'));
-        const failedRealIds = realIds.filter(id => !confirmedDeletedIds.includes(id));
-
-        if (failedRealIds.length > 0) {
-          // UI aur IndexedDB mein failed rows restore karo. Isse user ko false deletion
-          // nahi dikhegi aur wo PostgreSQL mutation retry kar sakta hai.
-          const failedTransactions = transactionsToDelete.filter(tx => failedRealIds.includes(tx.id));
-          for (const tx of failedTransactions) {
-            await localDB.saveTransaction({ ...tx, isSynced: true });
-          }
-          setAllTransactions(prev => sortTransactionsByDate([
-            ...prev.filter(tx => !failedRealIds.includes(tx.id)),
-            ...failedTransactions.map(tx => ({ ...tx, isSynced: true }))
-          ]));
-          removePendingDeletes(failedRealIds);
-          setDatabaseConnected(false);
-          throw new Error(`Transaction delete PostgreSQL mein confirm nahi hua: ${failedRealIds.join(', ')}`);
-        }
-
-        removePendingDeletes([...confirmedDeletedIds, ...tempIds]);
-
-        // Telegram media delete (slow — last mein)
-        for (const tx of transactionsToDelete) {
-          if (tx.slip && tx.slip.startsWith('tg:')) {
-            const content = tx.slip.replace(/^tg:(pdf:)?/, '');
-            const parts = content.split(':');
-            const messageId = parts[1];
-            if (messageId) {
-              console.log(`🗑️ Deleting media message ${messageId} for transaction ${tx.id}...`);
-              await deleteTelegramMessage(messageId);
-            }
-          }
-        }
-      } catch (error) {
-        console.error(`❌ Transaction delete failed:`, error);
-        throw error;
+    try {
+      // Remove local cache immediately. The queue above remains the source of truth for
+      // the remote deletion until Aiven confirms it after a reconnect.
+      for (const id of uniqueIds) {
+        await localDB.deleteTransaction(id);
       }
-    })();
-  }, []);
+    } catch (error) {
+      // The intent is still safely stored in localStorage, so it will not be lost even
+      // if IndexedDB is temporarily unavailable on this device.
+      console.warn('Local delete cache update failed; queued server deletion is retained:', error);
+    }
+
+    const queuedDeleteResult = await flushPendingDeletes();
+    if (queuedDeleteResult.pendingIds.length > 0) {
+      setDatabaseConnected(false);
+      console.log(`📴 ${queuedDeleteResult.pendingIds.length} deletion(s) remain queued for the next reconnect.`);
+    } else if (queuedDeleteResult.confirmedIds.length > 0) {
+      console.log(`✅ Aiven PostgreSQL delete confirmed for ${queuedDeleteResult.confirmedIds.length} transaction(s).`);
+      lastFetchTimeRef.current = 0;
+    }
+
+    // Media cleanup is independent from transaction persistence. It is deliberately
+    // non-blocking so an offline file deletion can never undo the queued DB delete.
+    for (const tx of transactionsToDelete) {
+      if (tx.slip && tx.slip.startsWith('tg:')) {
+        const content = tx.slip.replace(/^tg:(pdf:)?/, '');
+        const messageId = content.split(':')[1];
+        if (messageId) {
+          void deleteTelegramMessage(messageId).catch(error =>
+            console.warn(`Media cleanup will be retried separately for transaction ${tx.id}:`, error)
+          );
+        }
+      }
+    }
+  }, [flushPendingDeletes]);
 
 
   const addCompany = useCallback(async (companyName: string) => {

@@ -125,7 +125,11 @@ export class AivenDatabaseService {
       const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions/${id}`, {
         method: 'DELETE'
       });
-      return response.ok;
+
+      // DELETE must be idempotent for offline replay. A response can be lost after
+      // PostgreSQL already removed the row; a later retry then receives 404. In both
+      // cases the desired final state (row absent) has been reached.
+      return response.ok || response.status === 404;
     } catch (error) {
       console.error('Error deleting transaction from PostgreSQL:', error);
       return false;
