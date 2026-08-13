@@ -14,7 +14,6 @@ import { sendTelegramPhoto } from '../services/telegramService';
 import { BANK_LOGOS, BANK_NAMES, UPI_BANK_NAMES } from '../constants';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
-import SlipImage from '../components/SlipImage';
 import SimpleCropper from '../components/SimpleCropper';
 
 const TransactionPage: React.FC = () => {
@@ -224,20 +223,15 @@ const TransactionPage: React.FC = () => {
   };
 
   return (
-    <div
-      className="max-w-3xl mx-auto rounded-3xl p-6 sm:p-8"
-      style={{
-        background: '#FFFFFF',
-        border: '1px solid #E0E7FF',
-        boxShadow: '0 4px 24px rgba(99,102,241,0.08)',
-      }}
-    >
+    <div className="modern-entry-shell transaction-page-enter max-w-3xl mx-auto">
+      <div className="p-3 sm:p-5 md:p-6">
       {successMessage && (
         <div
-          className="px-4 py-3 rounded-2xl text-sm font-semibold text-center mb-6 animate-in slide-in-from-top-4"
+          className="transaction-success-pop px-4 py-3 rounded-2xl text-sm font-semibold text-center mb-4"
+          role="status"
           style={{ background: '#ECFDF5', border: '1px solid #A7F3D0', color: '#059669' }}
         >
-          ✅ {successMessage}
+          <span className="transaction-success-tick" aria-hidden="true">✓</span> {successMessage}
         </div>
       )}
       {error && (
@@ -249,125 +243,29 @@ const TransactionPage: React.FC = () => {
         </div>
       )}
 
-      <div className="space-y-6">
+      <div className="flex flex-col gap-3 sm:gap-4">
 
-        {/* Cash Denominations */}
-        <div>
-          <div className="section-label">
-            <span>💵 Cash Denominations</span>
-          </div>
-          <CurrencyCounter value={breakdown} onChange={setBreakdown} />
-        </div>
-
-        {/* Total Amount */}
-        <div
-          className="p-5 rounded-2xl text-center"
-          style={{
-            background: 'linear-gradient(135deg, #EEF2FF 0%, #EDE9FE 100%)',
-            border: '1px solid #C7D2FE',
-          }}
-        >
-          <p className="text-[10px] font-black uppercase tracking-widest mb-1" style={{ color: '#6366F1' }}>Total Amount</p>
-          <h3 className="text-3xl font-black tabular-nums" style={{ color: '#1E1B4B' }}>
-            ₹{totalAmount.toLocaleString('en-IN')}
-          </h3>
-        </div>
-
-        {/* Account & Slip */}
-        <div className="space-y-4">
-          <div className="section-label"><span>🏦 Account & Slip</span></div>
-          <div>
-            <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5 ml-1" style={{ color: '#6366F1' }}>
-              Select Account
-            </label>
-            <select
-              value={selectedBank}
-              onChange={(e) => setSelectedBank(e.target.value)}
-              className="w-full p-3.5 rounded-2xl font-black uppercase outline-none transition-all text-sm"
-              style={{
-                background: '#F5F7FF',
-                border: '1.5px solid #E0E7FF',
-                color: '#1E1B4B',
-              }}
-              onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}
-              onBlur={e => { e.target.style.borderColor = '#E0E7FF'; e.target.style.boxShadow = 'none'; }}
-            >
-              <option value="">-- Choose Account --</option>
-              {allBankNames.map(bank => (
-                <option key={bank} value={bank}>{bank}</option>
-              ))}
-            </select>
-          </div>
-
-          <div
-            className="p-3 rounded-2xl"
-            style={{ background: '#F5F7FF', border: '2px dashed #C7D2FE' }}
-          >
-            <input type="file" id="slip-upload" accept="image/*,application/pdf" onChange={handleFileChange} className="hidden" />
-            {!slip ? (
-              <button
-                type="button"
-                onClick={() => handleImageCapture(false)}
-                className="w-full flex items-center justify-center gap-4 py-4 rounded-xl transition-all group"
-                style={{ background: '#EEF2FF', border: '1.5px solid #C7D2FE' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = '#E0E7FF'; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = '#EEF2FF'; }}
-              >
-                <div
-                  className="p-3 rounded-full shadow-lg group-hover:scale-110 transition-transform"
-                  style={{ background: 'linear-gradient(135deg, #6366F1 0%, #4F46E5 100%)' }}
-                >
-                  <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                </div>
-                <div className="text-left">
-                  <span className="block text-xs font-black uppercase tracking-widest" style={{ color: '#4F46E5' }}>Add Entry Slip</span>
-                  <span className="block text-[9px] font-bold uppercase" style={{ color: '#818CF8' }}>Camera or Gallery</span>
-                </div>
-              </button>
-            ) : (
-              <div className="relative flex flex-col items-center">
-                <SlipImage src={slip} alt="Entry Slip" className="h-32 w-full object-contain rounded-xl shadow-lg" style={{ background: '#fff', border: '2px solid #E0E7FF' } as any} />
-                <button
-                  type="button"
-                  onClick={() => setSlip(null)}
-                  className="absolute -top-2 -right-2 p-1.5 text-white rounded-full shadow-xl hover:scale-110 active:scale-95 transition-all"
-                  style={{ background: '#E11D48' }}
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg>
-                </button>
-                <span className="mt-2 text-[8px] font-black uppercase tracking-widest" style={{ color: '#059669' }}>✓ Slip Uploaded</span>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Person & Company */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5 ml-1" style={{ color: '#6366F1' }}>Customer Name</label>
-            <div className="relative">
-              <div className="absolute inset-y-0 left-3.5 flex items-center pointer-events-none"><UserIcon className="h-5 w-5" style={{ color: '#A5B4FC' } as any} /></div>
-              <input
-                type="text" value={person} onChange={e => setPerson(e.target.value)}
-                disabled={isPersonalUdhar}
-                className="block w-full pl-10 pr-3 py-3 rounded-2xl text-sm outline-none transition-all disabled:opacity-60"
-                style={{ background: '#F5F7FF', border: '1.5px solid #E0E7FF', color: '#1E1B4B' }}
-                placeholder="Customer's name"
-                onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}
-                onBlur={e => { e.target.style.borderColor = '#E0E7FF'; e.target.style.boxShadow = 'none'; }}
-              />
+        {/* Cash denominations and total */}
+        <section className="modern-section order-1 p-3 sm:p-4">
+          <div className="flex items-center justify-between gap-3 mb-2">
+            <h2 className="compact-section-heading !mb-0">Cash denominations</h2>
+            <div className="compact-inline-total">
+              <span>Total</span>
+              <strong>₹{totalAmount.toLocaleString('en-IN')}</strong>
             </div>
           </div>
+          <CurrencyCounter value={breakdown} onChange={setBreakdown} />
+        </section>
+
+        {/* Company, Location & Date */}
+        <section className="modern-section order-3 grid grid-cols-2 gap-3 p-3 sm:p-4">
           <div>
-            <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5 ml-1" style={{ color: '#6366F1' }}>Company</label>
+            <label className="block text-[9px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#6366F1' }}>Company</label>
             <div className="relative">
-              <div className="absolute inset-y-0 left-3.5 flex items-center pointer-events-none"><BuildingOfficeIcon className="h-5 w-5" style={{ color: '#A5B4FC' } as any} /></div>
+              <div className="absolute inset-y-0 left-2.5 flex items-center pointer-events-none"><BuildingOfficeIcon className="h-4 w-4" style={{ color: '#A5B4FC' } as any} /></div>
               <select
                 value={company} onChange={e => setCompany(e.target.value)} disabled={isPersonalUdhar}
-                className="block w-full pl-10 pr-3 py-3 rounded-2xl text-sm outline-none appearance-none transition-all disabled:opacity-60"
+                className="block w-full appearance-none pl-8 pr-2 py-2.5 rounded-xl text-xs outline-none font-black uppercase transition-all disabled:opacity-60"
                 style={{ background: '#F5F7FF', border: '1.5px solid #E0E7FF', color: '#1E1B4B' }}
                 onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}
                 onBlur={e => { e.target.style.borderColor = '#E0E7FF'; e.target.style.boxShadow = 'none'; }}
@@ -378,17 +276,13 @@ const TransactionPage: React.FC = () => {
               </select>
             </div>
           </div>
-        </div>
-
-        {/* Location & Date */}
-        <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5 ml-1" style={{ color: '#6366F1' }}>Location</label>
+            <label className="block text-[9px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#6366F1' }}>Location</label>
             <div className="relative">
-              <div className="absolute inset-y-0 left-3.5 flex items-center pointer-events-none"><MapPinIcon className="h-5 w-5" style={{ color: '#A5B4FC' } as any} /></div>
+              <div className="absolute inset-y-0 left-2.5 flex items-center pointer-events-none"><MapPinIcon className="h-4 w-4" style={{ color: '#A5B4FC' } as any} /></div>
               <select
                 value={location} onChange={e => setLocation(e.target.value)} required
-                className="block w-full pl-10 pr-3 py-3 rounded-2xl text-sm outline-none font-black uppercase transition-all"
+                className="block w-full pl-8 pr-2 py-2.5 rounded-xl text-xs outline-none font-black uppercase transition-all"
                 style={{ background: '#F5F7FF', border: '1.5px solid #E0E7FF', color: '#1E1B4B' }}
                 onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}
                 onBlur={e => { e.target.style.borderColor = '#E0E7FF'; e.target.style.boxShadow = 'none'; }}
@@ -398,69 +292,76 @@ const TransactionPage: React.FC = () => {
               </select>
             </div>
           </div>
-          <div>
-            <label className="block text-[10px] font-black uppercase tracking-widest mb-1.5 ml-1" style={{ color: '#6366F1' }}>Entry Date</label>
+          <div className="mobile-extra-transaction-field">
+            <label className="block text-[10px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#4338CA' }}>Customer Name</label>
             <div className="relative">
-              <div className="absolute inset-y-0 left-3.5 flex items-center pointer-events-none"><CalendarDaysIcon className="h-5 w-5" style={{ color: '#A5B4FC' } as any} /></div>
+              <div className="absolute inset-y-0 left-2.5 flex items-center pointer-events-none"><UserIcon className="h-4 w-4" style={{ color: '#A5B4FC' } as any} /></div>
               <input
-                type="datetime-local" value={manualDate} onChange={e => setManualDate(e.target.value)}
-                className="block w-full pl-10 pr-3 py-3 rounded-2xl text-sm outline-none transition-all"
-                style={{ background: '#F5F7FF', border: '1.5px solid #E0E7FF', color: '#1E1B4B' }}
+                type="text" value={person} onChange={e => setPerson(e.target.value)} disabled={isPersonalUdhar}
+                className="block w-full pl-8 pr-3 py-2.5 rounded-xl text-xs font-semibold outline-none transition-all placeholder:text-slate-500 disabled:opacity-60"
+                style={{ background: '#FFFFFF', border: '1.5px solid #C7D2FE', color: '#1E1B4B' }}
+                placeholder="Enter customer name"
                 onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}
                 onBlur={e => { e.target.style.borderColor = '#E0E7FF'; e.target.style.boxShadow = 'none'; }}
               />
             </div>
           </div>
-        </div>
+          <div className="mobile-extra-transaction-field">
+            <label className="block text-[9px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#6366F1' }}>Account</label>
+            <select
+              value={selectedBank}
+              onChange={(e) => setSelectedBank(e.target.value)}
+              className="block w-full px-3 py-2.5 rounded-xl font-black uppercase outline-none transition-all text-xs"
+              style={{ background: '#F5F7FF', border: '1.5px solid #E0E7FF', color: '#1E1B4B' }}
+              onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}
+              onBlur={e => { e.target.style.borderColor = '#E0E7FF'; e.target.style.boxShadow = 'none'; }}
+            >
+              <option value="">Select Account</option>
+              {allBankNames.map(bank => <option key={bank} value={bank}>{bank}</option>)}
+            </select>
+          </div>
+        </section>
 
-        {/* Action Buttons */}
-        <div>
+        {/* Date, slip and transaction actions */}
+        <div className="compact-action-bar order-4 sticky z-20 space-y-2.5">
           {prefilledType ? (
             <button
               type="button"
               onClick={() => handleTransaction(prefilledType)}
               disabled={isSubmitting || totalAmount < 0}
-              className="w-full flex items-center justify-center gap-2 py-4 rounded-2xl font-black text-sm uppercase tracking-widest text-white transition-all active:scale-95 disabled:opacity-50"
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl font-black text-xs uppercase tracking-widest text-white transition-all active:scale-95 disabled:opacity-50"
               style={{
-                background: prefilledType === 'credit'
-                  ? 'linear-gradient(135deg, #10B981 0%, #059669 100%)'
-                  : 'linear-gradient(135deg, #F43F5E 0%, #E11D48 100%)',
-                boxShadow: prefilledType === 'credit'
-                  ? '0 6px 20px rgba(16,185,129,0.35)'
-                  : '0 6px 20px rgba(244,63,94,0.35)',
+                background: prefilledType === 'credit' ? 'linear-gradient(135deg, #10B981 0%, #059669 100%)' : 'linear-gradient(135deg, #F43F5E 0%, #E11D48 100%)',
+                boxShadow: prefilledType === 'credit' ? '0 6px 20px rgba(16,185,129,0.35)' : '0 6px 20px rgba(244,63,94,0.35)',
               }}
             >
               {prefilledType === 'credit' ? '↑' : '↓'} {prefilledType} — ₹{totalAmount.toLocaleString('en-IN')}
             </button>
           ) : (
-            <div className="grid grid-cols-2 gap-4">
-              <button
-                type="button"
-                onClick={() => handleTransaction('debit')}
-                disabled={isSubmitting || totalAmount <= 0}
-                className="flex items-center justify-center gap-2 py-4 rounded-2xl font-black text-sm uppercase tracking-widest text-white transition-all active:scale-95 disabled:opacity-50"
-                style={{
-                  background: 'linear-gradient(135deg, #F43F5E 0%, #E11D48 100%)',
-                  boxShadow: '0 6px 20px rgba(244,63,94,0.30)',
-                }}
-              >
+            <div className="grid grid-cols-2 gap-2.5">
+              <button type="button" onClick={() => handleTransaction('debit')} disabled={isSubmitting || totalAmount <= 0} className="flex items-center justify-center gap-1.5 py-3 rounded-xl font-black text-xs uppercase tracking-widest text-white transition-all active:scale-95 disabled:opacity-50" style={{ background: 'linear-gradient(135deg, #F43F5E 0%, #E11D48 100%)', boxShadow: '0 6px 20px rgba(244,63,94,0.30)' }}>
                 <TrendingDownIcon className="h-5 w-5" /> Debit
               </button>
-              <button
-                type="button"
-                onClick={() => handleTransaction('credit')}
-                disabled={isSubmitting || totalAmount <= 0}
-                className="flex items-center justify-center gap-2 py-4 rounded-2xl font-black text-sm uppercase tracking-widest text-white transition-all active:scale-95 disabled:opacity-50"
-                style={{
-                  background: 'linear-gradient(135deg, #10B981 0%, #059669 100%)',
-                  boxShadow: '0 6px 20px rgba(16,185,129,0.30)',
-                }}
-              >
+              <button type="button" onClick={() => handleTransaction('credit')} disabled={isSubmitting || totalAmount <= 0} className="flex items-center justify-center gap-1.5 py-3 rounded-xl font-black text-xs uppercase tracking-widest text-white transition-all active:scale-95 disabled:opacity-50" style={{ background: 'linear-gradient(135deg, #10B981 0%, #059669 100%)', boxShadow: '0 6px 20px rgba(16,185,129,0.30)' }}>
                 <TrendingUpIcon className="h-5 w-5" /> Credit
               </button>
             </div>
           )}
+          <div className="mobile-extra-transaction-actions grid grid-cols-2 gap-2.5">
+            <label className="compact-action-control">
+              <span>Date</span>
+              <input type="datetime-local" value={manualDate} onChange={e => setManualDate(e.target.value)} />
+            </label>
+            <div className="compact-action-control">
+              <input type="file" id="slip-upload" accept="image/*,application/pdf" onChange={handleFileChange} className="hidden" />
+              <span>Slip</span>
+              <button type="button" onClick={() => slip ? setSlip(null) : handleImageCapture(false)}>
+                {slip ? 'Remove slip' : 'Add slip'}
+              </button>
+            </div>
+          </div>
         </div>
+      </div>
       </div>
 
       {imageToCrop && (

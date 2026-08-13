@@ -27,11 +27,11 @@ const Header: React.FC = () => {
 
   return (
     <header className="glass sticky top-0 z-40 no-print">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center h-16 gap-6">
+      <div className="max-w-7xl mx-auto px-5 sm:px-7 flex items-center h-[4.5rem] gap-7">
 
         {/* Logo */}
         <div className="flex items-center gap-3 flex-shrink-0">
-          <div className="w-9 h-9 rounded-2xl flex items-center justify-center shadow-lg" style={{ background: 'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)', boxShadow: '0 4px 14px rgba(99,102,241,0.4)' }}>
+          <div className="w-10 h-10 rounded-[1rem] flex items-center justify-center shadow-lg" style={{ background: 'linear-gradient(135deg, #312E81 0%, #4F46E5 58%, #7C3AED 100%)', boxShadow: '0 9px 20px rgba(67,56,202,0.28)' }}>
             <span className="text-white font-black text-[11px] tracking-tighter">AE</span>
           </div>
           <div className="hidden sm:block">
@@ -77,18 +77,16 @@ const Header: React.FC = () => {
               key={path}
               to={path}
               className={({ isActive }) =>
-                `flex items-center gap-2 px-3.5 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all duration-200
+                `desktop-nav-link flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all duration-200
                  ${isActive
-                   ? 'text-white shadow-lg scale-105'
-                   : 'text-slate-400 hover:text-indigo-600'
+                   ? 'is-active text-white shadow-lg'
+                   : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50/70'
                  }`
               }
               style={({ isActive }) => isActive ? {
-                background: 'linear-gradient(135deg, #6366F1 0%, #4F46E5 100%)',
-                boxShadow: '0 6px 16px rgba(99,102,241,0.35)',
-              } : {
-                background: 'transparent',
-              }}
+                background: 'linear-gradient(135deg, #4338CA 0%, #4F46E5 100%)',
+                boxShadow: '0 8px 18px rgba(79,70,229,0.26)',
+              } : { background: 'transparent' }}
             >
               <Icon className="w-4 h-4" />
               <span className="hidden lg:block">{label}</span>
@@ -103,7 +101,7 @@ const Header: React.FC = () => {
             <button
               onClick={() => manualSync()}
               disabled={syncStatus === 'syncing'}
-              className="p-2.5 rounded-xl transition-all active:scale-90 border"
+              className="p-2.5 rounded-xl transition-all active:scale-90 border border-slate-200 bg-white/70 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600"
               style={{ boxShadow: '0 2px 8px rgba(99,102,241,0.08)' }}
             >
             <svg
@@ -131,7 +129,7 @@ const Header: React.FC = () => {
             </div>
             <button
               onClick={handleLogout}
-              className="p-2 rounded-xl transition-all active:scale-90"
+              className="p-2 rounded-xl transition-all active:scale-90 hover:bg-rose-50"
               style={{ color: '#9CA3AF' }}
               onMouseEnter={e => {
                 (e.currentTarget as HTMLButtonElement).style.color = '#E11D48';

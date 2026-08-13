@@ -50,7 +50,7 @@ const App: React.FC = () => {
       <AppProvider>
         <Router>
           <BackButtonHandler />
-          <div className="min-h-screen flex flex-col" style={{ background: '#F5F7FF', color: '#1E1B4B' }}>
+          <div className="app-shell min-h-screen flex flex-col" style={{ color: '#0f172a' }}>
             <Routes>
               {/* Public Routes */}
               <Route path="/login" element={<LoginPage />} />
@@ -58,15 +58,15 @@ const App: React.FC = () => {
               {/* Protected Routes */}
               <Route path="/*" element={
                 <ProtectedRoute>
-                  <div className="flex flex-col min-h-screen">
+                  <div className="app-page flex flex-col min-h-screen">
                     {/* Header - Hidden on small screens, shown on larger screens */}
                     <div className="hidden md:block no-print">
                       <Header />
                     </div>
                     
-                      {/* Main content with responsive padding. Side-swipe navigation is intentionally disabled. */}
-                      <main className="flex-1 container mx-auto px-2 sm:px-6 lg:px-8 py-4 pb-28 md:pb-6 overflow-y-auto">
-                        <Routes>
+                    {/* Main content with responsive padding */}
+                    <main className="app-content mobile-safe-bottom flex-1 px-3 sm:px-6 lg:px-8 py-4 sm:py-6 md:pb-8 overflow-y-auto">
+                      <Routes>
                         <Route path="/" element={<TransactionPage />} />
                         <Route path="/history" element={<HistoryPage />} />
                         <Route path="/vault" element={<VaultPage />} />
@@ -85,7 +85,7 @@ const App: React.FC = () => {
                         <Route path="/edit/:transactionId" element={<EditTransactionPage />} />
                         
                         <Route path="*" element={<Navigate to="/" replace />} />
-                        </Routes>
+                      </Routes>
                     </main>
                     
                     {/* Bottom Navigation - Only on mobile/tablet */}
