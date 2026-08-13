@@ -18,7 +18,7 @@ const BottomNavigation: React.FC = () => {
   const { pathname } = useLocation();
 
   return (
-    <nav className="fixed bottom-7 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-md z-50 no-print safe-area-pb">
+    <nav className="fixed bottom-5 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-md z-50 no-print safe-area-pb">
       <div className="glass rounded-[2rem] px-3 py-2">
         <div className="flex justify-around items-center">
           {navItems.map(item => {
