@@ -794,12 +794,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           recentlyUpdatedIdsRef.current.clear(); // Clear karo taaki next cycle mein repeat na ho
         }
 
-        // Force full refresh when forced (delete/foreground/recent-updates); otherwise incremental
-        const fetchedAll = shouldForceFull
-          ? await aivenDatabase.getAllTransactions(-1)
-          : null;
-
-        const fetched = fetchedAll ?? await aivenDatabase.getNewTransactions(maxId);
+        // Always fetch all transactions to guarantee complete data sync and prevent missing records.
+        const fetched = await aivenDatabase.getAllTransactions(-1);
 
         if (fetched.length === 0 && !shouldForceFull) {
           console.log('✅ No new data in polling.');
@@ -1462,7 +1458,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           await localDB.saveTransaction(unsyncedUpdate);
           setAllTransactions(prev => prev.map(tx => tx.id === unsyncedUpdate.id ? unsyncedUpdate : tx));
           setDatabaseConnected(false);
-          throw new Error('Transaction update PostgreSQL mein save nahi hua. Please retry.');
+          console.log(`📴 Offline update saved locally; queued for Aiven PostgreSQL sync upon reconnect.`);
+          // Graceful success for offline edit — do not throw error so user workflow is uninterrupted.
+          return;
         }
 
         if (!txToBroadcast) return;
