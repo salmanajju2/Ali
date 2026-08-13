@@ -1020,54 +1020,53 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       // ✅ STEP 2: UI turant update karo (LocalDB save ke baad)
       setAllTransactions(prev => [newTransaction, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
 
-      // ✅ STEP 3: BACKGROUND mein D1 + Telegram sync (offline ho to skip, baad mein manualSync karega)
-      const currentD1Connected = d1Connected;
+      // STEP 3: Every new entry attempts the PostgreSQL write immediately. d1Connected is
+      // only an observed connection state; it must never decide whether a user write is sent.
       (async () => {
         try {
-          if (slipToStore && slipToStore.startsWith('data:')) {
-            console.log('📤 Uploading slip to Telegram in background...');
-            const fileId = await sendTelegramPhoto(slipToStore);
-            if (fileId) {
-              const tgSlip = `tg:${fileId}`;
-              console.log('✅ Background Slip upload success:', fileId);
-              const updatedWithTg = { ...newTransaction, slip: tgSlip };
-              setAllTransactions(prev => prev.map(tx => tx.id === newTransaction.id ? updatedWithTg : tx));
-              await saveToLocalWithRetry(updatedWithTg);
+          let transactionForServer: Transaction = newTransaction;
 
-              if (currentD1Connected) {
-                const serverId = await d1Database.addTransaction(updatedWithTg);
-                if (serverId) {
-                  const finalTx = { ...updatedWithTg, id: serverId, isSynced: true };
-                  await localDB.deleteTransaction(newTransaction.id);
-                  await saveToLocalWithRetry(finalTx);
-                  setAllTransactions(prev => prev.map(tx => (tx.id === newTransaction.id || tx.id === serverId) ? finalTx : tx));
-                  realtimeSync.notifyUpdate({ action: 'add', transaction: finalTx });
-                }
+          // Receipt media belongs in Discord. A receipt-upload failure must not prevent the
+          // financial transaction itself from reaching PostgreSQL.
+          if (slipToStore && slipToStore.startsWith('data:')) {
+            console.log('📤 Uploading slip to Discord in background...');
+            try {
+              const fileId = await sendTelegramPhoto(slipToStore);
+              if (fileId) {
+                transactionForServer = { ...newTransaction, slip: `tg:${fileId}` };
+                setAllTransactions(prev => prev.map(tx =>
+                  tx.id === newTransaction.id ? transactionForServer : tx
+                ));
+                await saveToLocalWithRetry(transactionForServer);
+              } else {
+                console.warn('⚠️ Receipt upload returned no file ID; saving transaction without a remote receipt.');
+                transactionForServer = { ...newTransaction, slip: undefined };
               }
-            } else if (currentD1Connected) {
-              const serverId = await d1Database.addTransaction(newTransaction);
-              if (serverId) {
-                const finalTx = { ...newTransaction, id: serverId, isSynced: true };
-                await localDB.deleteTransaction(newTransaction.id);
-                await saveToLocalWithRetry(finalTx);
-                setAllTransactions(prev => prev.map(tx => (tx.id === newTransaction.id || tx.id === serverId) ? finalTx : tx));
-                realtimeSync.notifyUpdate({ action: 'add', transaction: finalTx });
-              }
-            }
-          } else if (currentD1Connected) {
-            const serverId = await d1Database.addTransaction(newTransaction);
-            if (serverId) {
-              const finalTx = { ...newTransaction, id: serverId, isSynced: true };
-              await localDB.deleteTransaction(newTransaction.id);
-              await saveToLocalWithRetry(finalTx);
-              setAllTransactions(prev => prev.map(tx => (tx.id === newTransaction.id || tx.id === serverId) ? finalTx : tx));
-              realtimeSync.notifyUpdate({ action: 'add', transaction: finalTx });
+            } catch (slipError) {
+              console.warn('⚠️ Receipt upload failed; saving transaction without a remote receipt:', slipError);
+              transactionForServer = { ...newTransaction, slip: undefined };
             }
           }
-          // Offline case: transaction already saved locally with isSynced:false
-          // manualSync ya next polling mein automatically D1 pe upload ho jaayega
+
+          const serverId = await d1Database.addTransaction(transactionForServer);
+          if (!serverId) {
+            // The unsynced local transaction remains durable and will be retried by sync.
+            setD1Connected(false);
+            return;
+          }
+
+          const finalTx = { ...transactionForServer, id: serverId, isSynced: true };
+          await localDB.deleteTransaction(newTransaction.id);
+          await saveToLocalWithRetry(finalTx);
+          setAllTransactions(prev => prev.map(tx =>
+            (tx.id === newTransaction.id || tx.id === serverId) ? finalTx : tx
+          ));
+          setD1Connected(true);
+          realtimeSync.notifyUpdate({ action: 'add', transaction: finalTx });
         } catch (e) {
-          console.error("Background sync error:", e);
+          // Keep the local isSynced:false record so the normal sync queue can retry it.
+          setD1Connected(false);
+          console.error("Background PostgreSQL save error:", e);
         }
       })();
 
@@ -1122,15 +1121,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       // UI update after LocalDB save
       setAllTransactions(prev => [newDebitTransaction, newCreditTransaction, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
 
-      const currentD1Connected = d1Connected;
       (async () => {
-        if (currentD1Connected) {
-          setSyncStatus('syncing');
-          // ✅ FIX: isAddingTransaction lock HATA diya D1Database se, ab concurrent uploads kaam karengi
-          const [serverIdDebit, serverIdCredit] = await Promise.all([
-            d1Database.addTransaction(newDebitTransaction),
-            d1Database.addTransaction(newCreditTransaction),
-          ]);
+        setSyncStatus('syncing');
+        // The connection flag is diagnostic only. Always attempt both PostgreSQL writes.
+        const [serverIdDebit, serverIdCredit] = await Promise.all([
+          d1Database.addTransaction(newDebitTransaction),
+          d1Database.addTransaction(newCreditTransaction),
+        ]);
 
           if (serverIdDebit && serverIdCredit) {
             const oldIdDebit = newDebitTransaction.id;
@@ -1172,8 +1169,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             }
           }
 
-          setSyncStatus('success');
-        }
+        setD1Connected(Boolean(serverIdDebit && serverIdCredit));
+        setSyncStatus(serverIdDebit && serverIdCredit ? 'success' : 'idle');
       })().catch(error => {
         setSyncStatus('error');
         console.error(`Failed to save or sync forward entry:`, error);
@@ -1240,23 +1237,27 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       // Balances and Vault update automatically via useMemo when allTransactions changes
 
 
-      const currentD1Connected = d1Connected;
-      // Persist in background
+      // Persist in the background. The connection indicator must not suppress a user write.
       (async () => {
+        let allWritesSucceeded = true;
         for (const tx of newTransactions) {
           await localDB.saveTransaction(tx);
-          if (currentD1Connected) {
-            const serverId = await d1Database.addTransaction(tx);
-            if (serverId) {
-              const synced = { ...tx, id: serverId, isSynced: true };
-              await localDB.deleteTransaction(tx.id);
-              await localDB.saveTransaction(synced);
-              setAllTransactions(prev => prev.map(t => t.id === tx.id ? synced : t));
-              realtimeSync.notifyUpdate({ action: 'add', transaction: synced });
-            }
+          const serverId = await d1Database.addTransaction(tx);
+          if (serverId) {
+            const synced = { ...tx, id: serverId, isSynced: true };
+            await localDB.deleteTransaction(tx.id);
+            await localDB.saveTransaction(synced);
+            setAllTransactions(prev => prev.map(t => t.id === tx.id ? synced : t));
+            realtimeSync.notifyUpdate({ action: 'add', transaction: synced });
+          } else {
+            allWritesSucceeded = false;
           }
         }
-      })();
+        setD1Connected(allWritesSucceeded);
+      })().catch(error => {
+        setD1Connected(false);
+        console.error('Failed to save settlement transactions to PostgreSQL:', error);
+      });
     } catch (error) {
       console.error('Settlement transaction failed:', error);
     } finally {
