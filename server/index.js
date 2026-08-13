@@ -351,6 +351,10 @@ app.delete('/api/transactions/:id', async (req, res) => {
   await withDatabase(res, async () => {
     const result = await pool.query('DELETE FROM transactions WHERE id=$1', [id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Transaction not found.' });
+
+    // Broadcast only after PostgreSQL confirms the deletion. This avoids the old
+    // race where another device refreshed before the record was actually removed.
+    io.emit('trigger-sync', { action: 'delete', ids: [String(id)] });
     res.json({ ok: true });
   });
 });

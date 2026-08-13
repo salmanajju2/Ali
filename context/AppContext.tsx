@@ -1403,10 +1403,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     // STEP 2: UI turant update karo
     setAllTransactions(prev => prev.filter(tx => !idsSet.has(tx.id)));
 
-    // STEP 3: Socket notify karo
-    realtimeSync.notifyUpdate({ action: 'delete', ids: ids });
+    // STEP 3: Database deletion ke baad server khud Socket.IO event broadcast karega.
+    // Isse kisi dusre device ko deletion event tabhi milta hai jab PostgreSQL mein
+    // record successfully remove ho chuka ho; pehle ka early broadcast stale web data la sakta tha.
+    // STEP 4: BACKGROUND mein LocalDB + PostgreSQL + Telegram delete
 
-    // STEP 4: BACKGROUND mein LocalDB + D1 + Telegram delete
     (async () => {
       try {
         // LocalDB se delete (hamesha — offline bhi)
