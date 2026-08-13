@@ -53,7 +53,9 @@ class RealtimeSyncService {
       reconnectionDelayMax: 5000,
       randomizationFactor: 0.5,
       timeout: 20000, 
-      transports: ['polling', 'websocket'], // Polling first — Render.com ke liye zaroori
+      // WebSocket first gives live Web → APK events the lowest latency. If a mobile
+      // proxy/network blocks it, Socket.IO automatically falls back to polling.
+      transports: ['websocket', 'polling'],
       autoConnect: true,
       withCredentials: false,
       forceNew: true,
@@ -80,6 +82,9 @@ class RealtimeSyncService {
       // background/network transition. Ask AppContext for one authoritative
       // PostgreSQL refresh as soon as the socket is available again.
       void this.syncCallback?.({ action: 'sync', reason: 'socket-connected' });
+      // Explicitly ask for reconciliation as well. This keeps the APK correct if
+      // a proxy restored a stale transport without replaying its missed broadcast.
+      this.socket?.emit('transaction-updated', { action: 'sync-status-check', testId: `apk-reconnect-${Date.now()}` });
     });
 
     this.socket.on('trigger-sync', async (data: any) => {

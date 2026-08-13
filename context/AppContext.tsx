@@ -322,6 +322,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   // Track current user UID to detect account switch
   const currentUserUidRef = useRef<string | null>(null);
   const syncInProgressRef = useRef(false);
+  // A Web Socket event can arrive while a full Aiven request is already running.
+  // Remember that event so the latest database state is fetched immediately after
+  // the in-flight request completes instead of silently dropping the refresh.
+  const queuedRealtimeRefreshRef = useRef(false);
   const lastFetchTimeRef = useRef<number>(0);
   const allTransactionsRef = useRef<Transaction[]>([]);
   // Track in-flight edits separately from new offline transactions. A real ID with
@@ -730,7 +734,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         return;
       }
 
-      if (syncInProgressRef.current) return;
+      if (syncInProgressRef.current) {
+        // Never lose a Web → APK event merely because another refresh was running.
+        // The finalizer below immediately performs one more authoritative fetch.
+        if (force) queuedRealtimeRefreshRef.current = true;
+        return;
+      }
       syncInProgressRef.current = true;
       lastFetchTimeRef.current = now;
 
@@ -885,6 +894,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         console.error('Full Aiven PostgreSQL refresh failed:', error);
       } finally {
         syncInProgressRef.current = false;
+
+        // A socket/reconnect event may have arrived during the request above. Run
+        // exactly one follow-up fetch so the event cannot be dropped by the lock.
+        if (queuedRealtimeRefreshRef.current) {
+          queuedRealtimeRefreshRef.current = false;
+          window.setTimeout(() => void refreshAllFromAiven(true), 0);
+        }
       }
     };
 
@@ -1037,15 +1053,16 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       }
     });
 
-    // Polling fallback: Android WebView socket temporarily disconnect ho toh bhi
-    // website ki entry APK mein lagbhag turant (max 3 seconds) aa jaye.
+    // Active-screen recovery: Android WebView/proxy kabhi socket ko “connected”
+    // dikhata hai lekin incoming broadcast miss kar deta hai. App visible ho toh
+    // har 2 seconds Aiven se authoritative reconciliation karao; hidden app ke
+    // liye existing reconnect/online events unnecessary battery usage bachate hain.
     const refreshInterval = window.setInterval(() => {
-      // A connected socket does not guarantee that an earlier HTTP DELETE reached
-      // PostgreSQL. Keep replaying any durable delete intent until the server confirms it.
-      if (pendingDeleteIdsRef.current.size > 0 || !realtimeSync.isSocketConnected()) {
+      const appIsVisible = typeof document === 'undefined' || !document.hidden;
+      if (appIsVisible || pendingDeleteIdsRef.current.size > 0 || !realtimeSync.isSocketConnected()) {
         void refreshAllFromAiven(true);
       }
-    }, 3000);
+    }, 2000);
 
     const handleOnline = () => {
       console.log('📶 Device back online. Triggering sync...');
