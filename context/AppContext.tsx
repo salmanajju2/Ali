@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode, useMemo, useRef } from 'react';
 import { Transaction, NoteCounts } from '../types';
 import { COMPANY_NAMES as defaultCompanyNames, LOCATIONS, DENOMINATIONS, BANK_NAMES, BANK_LOGOS } from '../constants';
-import { d1Database } from '../services/d1Database';
+import { aivenDatabase } from '../services/AivenDatabaseService';
 import { useAuth, User } from './AuthContext';
 import { localDB } from '../services/LocalDBService';
 import { sendTelegramMessage, sendTelegramPhoto, deleteTelegramMessage } from '../services/telegramService';
@@ -24,7 +24,7 @@ interface AppContextType {
   deleteCompany: (companyName: string) => Promise<void>;
   addLocation: (location: string) => Promise<void>;
   deleteLocation: (location: string) => Promise<void>;
-  d1Connected: boolean;
+  databaseConnected: boolean;
   socketConnected: boolean;
   syncStatus: 'idle' | 'syncing' | 'success' | 'error';
   manualSync: (forceFull?: boolean) => Promise<void>;
@@ -250,7 +250,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     const saved = localStorage.getItem('locations');
     return saved ? JSON.parse(saved) : LOCATIONS;
   });
-  const [d1Connected, setD1Connected] = useState(false);
+  const [databaseConnected, setDatabaseConnected] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
 
@@ -385,20 +385,20 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
     setSyncStatus('syncing');
     try {
-      console.log('🔄 Starting manual sync with D1...');
+      console.log('🔄 Starting manual sync with Aiven PostgreSQL...');
 
       const localTransactions = await localDB.getTransactions();
       console.log(`💿 Loaded ${localTransactions.length} local transactions for sync.`);
 
-      // ✅ Upload any unsynced (offline) local transactions to D1 first
+      // ✅ Upload any unsynced (offline) local transactions to Aiven PostgreSQL first
       // FIX: !tx.isSynced covers both false AND undefined (older records)
       const unsyncedLocal = localTransactions.filter(tx => !tx.isSynced);
       const idRecordMap: Record<string, string> = {};
 
       for (const localTx of unsyncedLocal) {
-        console.log(`📤 Uploading offline transaction ${localTx.id} to D1.`);
+        console.log(`📤 Uploading offline transaction ${localTx.id} to Aiven PostgreSQL.`);
         if (!localTx.id.toString().startsWith('temp_') && !localTx.id.toString().startsWith('recovered_')) {
-          const updated = await d1Database.updateTransaction(localTx);
+          const updated = await aivenDatabase.updateTransaction(localTx);
           if (updated) {
             localTx.isSynced = true;
             pendingUpdateIdsRef.current.delete(localTx.id);
@@ -410,7 +410,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
         }
 
-        const newServerId = await d1Database.addTransaction(localTx);
+        const newServerId = await aivenDatabase.addTransaction(localTx);
         if (newServerId) {
           const oldId = localTx.id;
           idRecordMap[oldId] = newServerId;
@@ -431,8 +431,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         }
       }
 
-      // Step 3: D1 se incremental/full fetch depending on local data
-      console.log('📥 Fetching latest data from D1...');
+      // Step 3: Aiven PostgreSQL se incremental/full fetch depending on local data
+      console.log('📥 Fetching latest data from Aiven PostgreSQL...');
 
       const numericIds = localTransactions
         .map(tx => parseInt(tx.id))
@@ -444,15 +444,15 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       
       if (localTransactions.length > 0 && maxId > 0 && !forceFull) {
         console.log('🔄 Performing Incremental Sync...');
-        fetchedTransactions = await d1Database.getNewTransactions(maxId);
+        fetchedTransactions = await aivenDatabase.getNewTransactions(maxId);
       } else {
         console.log('🔄 Performing Full Sync...');
-        fetchedTransactions = await d1Database.getAllTransactions(-1);
+        fetchedTransactions = await aivenDatabase.getAllTransactions(-1);
         isFullSync = true;
       }
       console.log(`📥 Manual Sync: Received ${fetchedTransactions.length} records for reconciliation.`);
 
-      setD1Connected(true);
+      setDatabaseConnected(true);
 
       const syncedFromServer = fetchedTransactions.map(tx => ({ ...tx, isSynced: true }));
 
@@ -461,13 +461,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         const pendingInMemory = prev.filter(tx => !tx.isSynced);
         let mergedList: Transaction[];
         if (isFullSync) {
-          // ✅ FIX: Full sync mein recently-updated transactions ko D1 stale data se bachao
+          // ✅ FIX: Full sync mein recently-updated transactions ko Aiven PostgreSQL stale data se bachao
           const serverIds = new Set(syncedFromServer.map(tx => tx.id));
           const localSyncedNotInServer = prev.filter(tx =>
             tx.isSynced && !serverIds.has(tx.id)
           );
 
-          // Local priority: pending (editing) + recently updated (D1 might be stale)
+          // Local priority: pending (editing) + recently updated (Aiven PostgreSQL might be stale)
           const localPriorityIds = new Set([
             ...pendingInMemory.map(tx => tx.id),
             ...pendingUpdateIdsRef.current,
@@ -517,7 +517,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       setSyncStatus('success');
       console.log('✅ Manual sync completed successfully.');
     } catch (error) {
-      setD1Connected(false);
+      setDatabaseConnected(false);
       setSyncStatus('error');
       console.error('💥 Manual sync failed:', error);
     }
@@ -538,7 +538,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       if (currentUserUidRef.current !== null) {
         console.log('\ud83d\udd12 Genuine logout detected in AppContext. Clearing UI state...');
         setAllTransactions([]);
-        setD1Connected(false);
+        setDatabaseConnected(false);
         setSyncStatus('idle');
         // \u274c IndexedDB clear mat karo — next login ke liye local data preserve karo
         hasInitialLoadRun.current = false;
@@ -551,7 +551,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     if (currentUserUidRef.current !== null && currentUserUidRef.current !== currentUser.uid) {
       console.log('🔄 Account switched! Clearing previous user data...');
       setAllTransactions([]);
-      setD1Connected(false);
+      setDatabaseConnected(false);
       setSyncStatus('idle');
       syncInProgressRef.current = false;
       localDB.clearAndRepopulateTransactions([]).catch(() => { });
@@ -564,7 +564,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     if (hasInitialLoadRun.current) return; // Already ran — skip
     hasInitialLoadRun.current = true;
 
-    // App open hone par SIRF EK BAAR D1 se sync karo
+    // App open hone par SIRF EK BAAR Aiven PostgreSQL se sync karo
     const initialLoad = async () => {
       setSyncStatus('syncing');
       try {
@@ -577,9 +577,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           console.log(`✅ LocalDB se ${sortedLocal.length} transactions loaded.`);
         }
 
-        // Step 2: D1 se INCREMENTAL/Full fetch karo depending on local data
+        // Step 2: Aiven PostgreSQL se INCREMENTAL/Full fetch karo depending on local data
         // initializeDatabase background mein chalao — UI block nahi hogi
-        d1Database.initializeDatabase().catch(e => console.warn('DB init error (background):', e));
+        aivenDatabase.initializeDatabase().catch(e => console.warn('DB init error (background):', e));
 
         const numericIds = localTransactions
           .map(tx => parseInt(tx.id))
@@ -591,22 +591,22 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
         if (localTransactions.length > 0 && maxId > 0) {
           console.log(`📥 Incremental Initial Sync: fetching updates since maxId ${maxId}`);
-          fetched = await d1Database.getNewTransactions(maxId);
+          fetched = await aivenDatabase.getNewTransactions(maxId);
         } else {
-          console.log(`📥 Initial Sync: Loaded all records from D1 (Full Sync).`);
-          fetched = await d1Database.getAllTransactions(-1);
+          console.log(`📥 Initial Sync: Loaded all records from Aiven PostgreSQL (Full Sync).`);
+          fetched = await aivenDatabase.getAllTransactions(-1);
           isFullSync = true;
         }
 
-        setD1Connected(true);
+        setDatabaseConnected(true);
 
         if (fetched && fetched.length > 0) {
-          const syncedFromD1 = fetched.map(tx => ({ ...tx, isSynced: true }));
+          const syncedFromAiven = fetched.map(tx => ({ ...tx, isSynced: true }));
 
           const pendingLocal = localTransactions.filter(tx => !tx.isSynced);
           const alreadySyncedLocal = localTransactions.filter(tx => tx.isSynced);
 
-          const mergedList = [...syncedFromD1, ...alreadySyncedLocal, ...pendingLocal];
+          const mergedList = [...syncedFromAiven, ...alreadySyncedLocal, ...pendingLocal];
           const deduplicatedList = deduplicateTransactions(mergedList);
           const finalSorted = sortTransactionsByDate(filterDeletedIds(deduplicatedList));
 
@@ -620,7 +620,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
               await localDB.clearAndRepopulateTransactions(finalSorted);
             } else {
               // Save only the new/updated transactions incrementally
-              for (const tx of syncedFromD1) {
+              for (const tx of syncedFromAiven) {
                 await localDB.saveTransaction(tx);
               }
             }
@@ -629,7 +629,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
           console.log(`✅ App open sync complete. Loaded ${fetched.length} updates. Total: ${finalSorted.length}`);
         } else {
-          console.log('ℹ️ No new updates from D1. Using local data.');
+          console.log('ℹ️ No new updates from Aiven PostgreSQL. Using local data.');
           if (localTransactions.length > 0) {
             const finalSorted = sortTransactionsByDate(localTransactions);
             setAllTransactions(finalSorted);
@@ -638,7 +638,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
         setSyncStatus('success');
       } catch (error) {
-        setD1Connected(false);
+        setDatabaseConnected(false);
         setSyncStatus('error');
         console.error('Initial sync failed:', error);
       }
@@ -653,7 +653,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
     const FETCH_COOLDOWN_MS = 20000; // 20 second cooldown between fetches
 
-    const refreshAllFromD1 = async (force = false) => {
+    const refreshAllFromAiven = async (force = false) => {
       const now = Date.now();
       const timeSinceLastFetch = now - lastFetchTimeRef.current;
 
@@ -679,7 +679,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             const isExistingServerTransaction = !tx.id.startsWith('temp_') && !tx.id.startsWith('recovered_');
 
             if (isExistingServerTransaction) {
-              const updated = await d1Database.updateTransaction({ ...tx, isSynced: true });
+              const updated = await aivenDatabase.updateTransaction({ ...tx, isSynced: true });
               if (updated) {
                 const syncedTx = { ...tx, isSynced: true };
                 await localDB.saveTransaction(syncedTx);
@@ -693,7 +693,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             }
 
             const oldId = tx.id;
-            const newServerId = await d1Database.addTransaction(tx);
+            const newServerId = await aivenDatabase.addTransaction(tx);
             if (newServerId) {
               const syncedTx = { ...tx, id: newServerId, isSynced: true };
               await localDB.deleteTransaction(oldId);
@@ -714,7 +714,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // ✅ FIX: Agar koi recently updated ID hai, toh force full refresh karo
         // Incremental sync (getNewTransactions) sirf NAYE records laata hai — updates ko miss karta hai
         // Updated transactions ka ID same rehta hai (koi nayi row nahi banti)
-        // Isliye full D1 fetch zaroori hai taaki updated data sahi aaye
+        // Isliye full Aiven PostgreSQL fetch zaroori hai taaki updated data sahi aaye
         // ✅ FIX: IDs snapshot pehle save karo, PHIR clear karo
         // Warna mergedList build hone tak IDs already clear ho jaate hain
         const recentlyUpdatedIds = new Set(recentlyUpdatedIdsRef.current);
@@ -722,23 +722,23 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         const shouldForceFull = force || hasRecentUpdates;
 
         if (hasRecentUpdates) {
-          console.log(`🔄 ${recentlyUpdatedIds.size} recently updated transaction(s) detected — forcing full D1 refresh.`);
+          console.log(`🔄 ${recentlyUpdatedIds.size} recently updated transaction(s) detected — forcing full Aiven PostgreSQL refresh.`);
           recentlyUpdatedIdsRef.current.clear(); // Clear karo taaki next cycle mein repeat na ho
         }
 
         // Force full refresh when forced (delete/foreground/recent-updates); otherwise incremental
         const fetchedAll = shouldForceFull
-          ? await d1Database.getAllTransactions(-1)
+          ? await aivenDatabase.getAllTransactions(-1)
           : null;
 
-        const fetched = fetchedAll ?? await d1Database.getNewTransactions(maxId);
+        const fetched = fetchedAll ?? await aivenDatabase.getNewTransactions(maxId);
 
         if (fetched.length === 0 && !shouldForceFull) {
           console.log('✅ No new data in polling.');
           return;
         }
 
-        const syncedFromD1 = fetched.map(tx => ({ ...tx, isSynced: true }));
+        const syncedFromAiven = fetched.map(tx => ({ ...tx, isSynced: true }));
 
         // ✅ FIX: Use functional update to MERGE with current in-memory state.
         // This prevents: (1) screen flash when network is slow,
@@ -749,14 +749,14 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
           let mergedList: Transaction[];
           if (shouldForceFull || fetchedAll !== null) {
-            const serverIds = new Set(syncedFromD1.map(tx => tx.id));
+            const serverIds = new Set(syncedFromAiven.map(tx => tx.id));
             const localSyncedNotInServer = prev.filter(tx =>
               tx.isSynced && !serverIds.has(tx.id)
             );
 
-            // ✅ BUG FIX: D1 replica lag se update overwrite hona band karo
+            // ✅ BUG FIX: Aiven PostgreSQL replica lag se update overwrite hona band karo
             // recentlyUpdatedIds mein woh IDs hain jo abhi-abhi update hui hain
-            // D1 ka stale replica inhe overwrite kar sakta hai — isliye local version protect karo
+            // Aiven PostgreSQL ka stale replica inhe overwrite kar sakta hai — isliye local version protect karo
             // pendingInMemory ke IDs bhi protect karo (concurrent update mid-flight)
             const localPriorityIds = new Set([
               ...pendingInMemory.map(tx => tx.id),
@@ -764,20 +764,20 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
               ...recentlyUpdatedIds,          // recently updated — local is fresher
             ]);
 
-            // D1 se aaya stale data filter karo jo local mein fresh hai
-            const filteredServerData = syncedFromD1.filter(tx => !localPriorityIds.has(tx.id));
+            // Aiven PostgreSQL se aaya stale data filter karo jo local mein fresh hai
+            const filteredServerData = syncedFromAiven.filter(tx => !localPriorityIds.has(tx.id));
             const filteredLocalSynced = localSyncedNotInServer.filter(tx => !localPriorityIds.has(tx.id));
 
             // Local priority transactions: pending + recently updated
             const localPriorityTxs = prev.filter(tx => localPriorityIds.has(tx.id));
 
             mergedList = [...filteredServerData, ...filteredLocalSynced, ...localPriorityTxs];
-            console.log(`🛡️ Protected ${localPriorityIds.size} local-priority transactions from D1 stale overwrite.`);
+            console.log(`🛡️ Protected ${localPriorityIds.size} local-priority transactions from Aiven PostgreSQL stale overwrite.`);
           } else {
             // Incremental: add new/updated from server, KEEP existing synced locals
-            const serverIds = new Set(syncedFromD1.map(tx => tx.id));
+            const serverIds = new Set(syncedFromAiven.map(tx => tx.id));
             const existingSynced = prev.filter(tx => tx.isSynced && !serverIds.has(tx.id));
-            mergedList = [...syncedFromD1, ...existingSynced, ...pendingInMemory];
+            mergedList = [...syncedFromAiven, ...existingSynced, ...pendingInMemory];
           }
 
           const deduplicatedList = deduplicateTransactions(mergedList);
@@ -797,7 +797,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                 await localDB.clearAndRepopulateTransactions(finalSorted);
               } else {
                 // Incremental: save new server transactions and delete deduplicated temp ones
-                for (const tx of syncedFromD1) {
+                for (const tx of syncedFromAiven) {
                   // ✅ BUG FIX: Deleted transactions ko IndexedDB mein wapas mat save karo
                   if (!pendingDeleteIdsRef.current.has(tx.id)) {
                     await localDB.saveTransaction(tx);
@@ -815,10 +815,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           return finalSorted;
         });
 
-        setD1Connected(true);
+        setDatabaseConnected(true);
       } catch (error) {
-        setD1Connected(false);
-        console.error('Full D1 refresh failed:', error);
+        setDatabaseConnected(false);
+        console.error('Full Aiven PostgreSQL refresh failed:', error);
       } finally {
         syncInProgressRef.current = false;
       }
@@ -830,7 +830,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     });
 
     // App foreground mein forced full-refresh (cooldown bypass)
-    realtimeSync.setPollCallback(() => refreshAllFromD1(true));
+    realtimeSync.setPollCallback(() => refreshAllFromAiven(true));
 
     // Socket event se direct UI update instant hota hai. Is small delayed full
     // refresh se Android WebView reconnect/missed-event edge cases bhi Aiven ke
@@ -840,7 +840,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       if (realtimeRefreshTimer !== undefined) window.clearTimeout(realtimeRefreshTimer);
       realtimeRefreshTimer = window.setTimeout(() => {
         realtimeRefreshTimer = undefined;
-        void refreshAllFromD1(true);
+        void refreshAllFromAiven(true);
       }, 350);
     };
 
@@ -961,7 +961,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
               await localDB.deleteTransaction(id);
             }
           } catch (e) { console.error('LocalDB Delete Error:', e); }
-          // ✅ No full D1 refresh needed — socket already sent correct IDs to remove
+          // ✅ No full Aiven PostgreSQL refresh needed — socket already sent correct IDs to remove
         }
 
         // Direct socket state merge ke baad Aiven database se reconcile karo.
@@ -976,12 +976,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     // Polling fallback: Android WebView socket temporarily disconnect ho toh bhi
     // website ki entry APK mein lagbhag turant (max 3 seconds) aa jaye.
     const refreshInterval = window.setInterval(() => {
-      if (!realtimeSync.isSocketConnected()) void refreshAllFromD1(true);
+      if (!realtimeSync.isSocketConnected()) void refreshAllFromAiven(true);
     }, 3000);
 
     const handleOnline = () => {
       console.log('📶 Device back online. Triggering sync...');
-      refreshAllFromD1(true);
+      refreshAllFromAiven(true);
     };
     window.addEventListener('online', handleOnline);
 
@@ -1049,7 +1049,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       // ✅ STEP 2: UI turant update karo (LocalDB save ke baad)
       setAllTransactions(prev => [newTransaction, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
 
-      // STEP 3: Every new entry attempts the PostgreSQL write immediately. d1Connected is
+      // STEP 3: Every new entry attempts the PostgreSQL write immediately. databaseConnected is
       // only an observed connection state; it must never decide whether a user write is sent.
       (async () => {
         try {
@@ -1077,10 +1077,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             }
           }
 
-          const serverId = await d1Database.addTransaction(transactionForServer);
+          const serverId = await aivenDatabase.addTransaction(transactionForServer);
           if (!serverId) {
             // The unsynced local transaction remains durable and will be retried by sync.
-            setD1Connected(false);
+            setDatabaseConnected(false);
             return;
           }
 
@@ -1090,11 +1090,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           setAllTransactions(prev => prev.map(tx =>
             (tx.id === newTransaction.id || tx.id === serverId) ? finalTx : tx
           ));
-          setD1Connected(true);
+          setDatabaseConnected(true);
           realtimeSync.notifyUpdate({ action: 'add', transaction: finalTx });
         } catch (e) {
           // Keep the local isSynced:false record so the normal sync queue can retry it.
-          setD1Connected(false);
+          setDatabaseConnected(false);
           console.error("Background PostgreSQL save error:", e);
         }
       })();
@@ -1109,7 +1109,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       setIsSubmitting(false);
       isSubmittingRef.current = false;
     }
-  }, [isSubmitting, d1Connected]);
+  }, [isSubmitting, databaseConnected]);
 
   const addForwardEntry = useCallback(async (debitTransaction: Omit<Transaction, 'id'>, creditTransaction: Omit<Transaction, 'id'>) => {
     if (isSubmittingRef.current || isSubmitting) {
@@ -1154,8 +1154,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         setSyncStatus('syncing');
         // The connection flag is diagnostic only. Always attempt both PostgreSQL writes.
         const [serverIdDebit, serverIdCredit] = await Promise.all([
-          d1Database.addTransaction(newDebitTransaction),
-          d1Database.addTransaction(newCreditTransaction),
+          aivenDatabase.addTransaction(newDebitTransaction),
+          aivenDatabase.addTransaction(newCreditTransaction),
         ]);
 
           if (serverIdDebit && serverIdCredit) {
@@ -1180,7 +1180,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             // Notify other devices about new forward entry with real IDs
             realtimeSync.notifyUpdate({ action: 'add', transaction: syncDebit });
             realtimeSync.notifyUpdate({ action: 'add', transaction: syncCredit });
-            console.log(`✅ Forward entry synced to D1: ${serverIdDebit}, ${serverIdCredit}`);
+            console.log(`✅ Forward entry synced to Aiven PostgreSQL: ${serverIdDebit}, ${serverIdCredit}`);
           } else {
             // ✅ FIX: Partial upload — jo upload hua uska ID update karo, jo nahi hua woh isSynced:false rahe (retry on next sync)
             console.warn(`⚠️ Forward entry partial upload: debit=${serverIdDebit}, credit=${serverIdCredit}. Missing ones will retry on next sync.`);
@@ -1198,7 +1198,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             }
           }
 
-        setD1Connected(Boolean(serverIdDebit && serverIdCredit));
+        setDatabaseConnected(Boolean(serverIdDebit && serverIdCredit));
         setSyncStatus(serverIdDebit && serverIdCredit ? 'success' : 'idle');
       })().catch(error => {
         setSyncStatus('error');
@@ -1211,7 +1211,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       setIsSubmitting(false);
       isSubmittingRef.current = false;
     }
-  }, [isSubmitting, d1Connected]);
+  }, [isSubmitting, databaseConnected]);
 
   const settleBankBalance = useCallback(async (sourceBank: string, targetBank: string, amount: number, recordedBy: string, location: string, service?: string) => {
     if (amount <= 0 || isSubmitting) return;
@@ -1271,7 +1271,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         let allWritesSucceeded = true;
         for (const tx of newTransactions) {
           await localDB.saveTransaction(tx);
-          const serverId = await d1Database.addTransaction(tx);
+          const serverId = await aivenDatabase.addTransaction(tx);
           if (serverId) {
             const synced = { ...tx, id: serverId, isSynced: true };
             await localDB.deleteTransaction(tx.id);
@@ -1282,9 +1282,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             allWritesSucceeded = false;
           }
         }
-        setD1Connected(allWritesSucceeded);
+        setDatabaseConnected(allWritesSucceeded);
       })().catch(error => {
-        setD1Connected(false);
+        setDatabaseConnected(false);
         console.error('Failed to save settlement transactions to PostgreSQL:', error);
       });
     } catch (error) {
@@ -1293,7 +1293,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       setIsSubmitting(false);
       isSubmittingRef.current = false;
     }
-  }, [isSubmitting, d1Connected]);
+  }, [isSubmitting, databaseConnected]);
 
   const updateTransaction = useCallback(async (updatedTransaction: Transaction & { manualDate?: string }) => {
     const normalizedTransaction = updatedTransaction.manualDate
@@ -1370,7 +1370,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           if (!txToProcess.clientId) {
             txToProcess = { ...txToProcess, clientId: txToProcess.id };
           }
-          const serverId = await d1Database.addTransaction(txToProcess);
+          const serverId = await aivenDatabase.addTransaction(txToProcess);
           if (serverId) {
             txToBroadcast = { ...txToProcess, id: serverId, isSynced: true };
             await localDB.deleteTransaction(txToProcess.id);
@@ -1379,7 +1379,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         } else {
           // The server receives the final synchronized record, while the UI/cache stays
           // unsynced until this request has acknowledged successfully.
-          success = await d1Database.updateTransaction({ ...txToProcess, isSynced: true });
+          success = await aivenDatabase.updateTransaction({ ...txToProcess, isSynced: true });
           if (success) {
             txToBroadcast = { ...txToProcess, isSynced: true };
           }
@@ -1389,12 +1389,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           const unsyncedUpdate = { ...txToProcess, isSynced: false };
           await localDB.saveTransaction(unsyncedUpdate);
           setAllTransactions(prev => prev.map(tx => tx.id === unsyncedUpdate.id ? unsyncedUpdate : tx));
-          setD1Connected(false);
+          setDatabaseConnected(false);
           throw new Error('Transaction update PostgreSQL mein save nahi hua. Please retry.');
         }
 
         if (!txToBroadcast) return;
-        setD1Connected(true);
+        setDatabaseConnected(true);
         await localDB.saveTransaction(txToBroadcast);
 
         // ✅ FIX: isSynced:true mark karo UI mein — ab polling ise overwrite nahi karegi
@@ -1421,7 +1421,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         throw error;
       }
     })();
-  }, [d1Connected]);
+  }, [databaseConnected]);
 
   const deleteTransactionsByIds = useCallback(async (ids: string[]) => {
     const idsSet = new Set(ids);
@@ -1446,7 +1446,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           await localDB.deleteTransaction(id);
         }
 
-        // D1 se delete — retry ke saath (3 attempts)
+        // Aiven PostgreSQL se delete — retry ke saath (3 attempts)
         const realIds = ids.filter(id => !id.startsWith('temp_') && !id.startsWith('recovered_'));
         const confirmedDeletedIds: string[] = [];
 
@@ -1454,18 +1454,18 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           let deleted = false;
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-              const ok = await d1Database.deleteTransaction(id);
+              const ok = await aivenDatabase.deleteTransaction(id);
               if (ok) { deleted = true; break; }
             } catch (e) {
-              console.warn(`⚠️ D1 delete attempt ${attempt} failed for ${id}:`, e);
+              console.warn(`⚠️ Aiven PostgreSQL delete attempt ${attempt} failed for ${id}:`, e);
             }
             if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
           }
           if (deleted) {
             confirmedDeletedIds.push(id);
-            console.log(`✅ D1 delete confirmed: ${id}`);
+            console.log(`✅ Aiven PostgreSQL delete confirmed: ${id}`);
           } else {
-            console.error(`❌ D1 delete failed after 3 attempts for ${id} — will retry on next sync`);
+            console.error(`❌ Aiven PostgreSQL delete failed after 3 attempts for ${id} — will retry on next sync`);
             // pendingDeleteIds mein rakho — next sync mein filter rahega
           }
         }
@@ -1486,7 +1486,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             ...failedTransactions.map(tx => ({ ...tx, isSynced: true }))
           ]));
           removePendingDeletes(failedRealIds);
-          setD1Connected(false);
+          setDatabaseConnected(false);
           throw new Error(`Transaction delete PostgreSQL mein confirm nahi hua: ${failedRealIds.join(', ')}`);
         }
 
@@ -1555,7 +1555,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     deleteCompany,
     addLocation,
     deleteLocation,
-    d1Connected,
+    databaseConnected,
     socketConnected,
     syncStatus,
     manualSync,

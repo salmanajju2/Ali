@@ -21,7 +21,7 @@ export interface Transaction {
   amount: number;
   notes: string;
   breakdown: NoteCounts; // For cash transactions only
-  isSynced?: boolean; // Track if this transaction has been synced to Cloudflare D1
+  isSynced?: boolean; // Track if this transaction has been synced to Aiven PostgreSQL
   isSettlement?: boolean; // Track if this is an automated settlement transaction
   clientId?: string; // Stable local ID used to prevent duplicate server inserts
 }

@@ -114,7 +114,7 @@ async function ensureTransactionSchema() {
       ADD COLUMN IF NOT EXISTS payment_method TEXT
   `);
 
-  // Older D1-era imports stored breakdown as TEXT. Convert the column once,
+  // Older legacy imports stored breakdown as TEXT. Convert the column once,
   // preserving valid JSON and safely replacing malformed legacy values with {}.
   const breakdownColumn = await pool.query(`
     SELECT data_type

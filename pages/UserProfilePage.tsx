@@ -9,7 +9,7 @@ import { StarIcon } from '../components/icons/StarIcon';
 import { WalletIcon } from '../components/icons/WalletIcon';
 import { ChevronRightIcon } from '../components/icons/ChevronRightIcon';
 import { BankIcon } from '../components/icons/BankIcon';
-import { d1Database } from '../services/d1Database';
+import { aivenDatabase } from '../services/AivenDatabaseService';
 
 const UserProfilePage: React.FC = () => {
   const { user, transactions, totalSystemCount, clearLocalDB, manualSync, syncStatus } = useAppContext();
@@ -46,7 +46,7 @@ const UserProfilePage: React.FC = () => {
 
     setIsRepairing(true);
     try {
-      const result = await d1Database.repairDatabase();
+      const result = await aivenDatabase.repairDatabase();
       if (result.success) {
         // IMPORTANT: Clear local cache to force a fresh download of the clean data
         await clearLocalDB();

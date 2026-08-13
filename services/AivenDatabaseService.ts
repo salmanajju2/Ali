@@ -1,8 +1,8 @@
 // PostgreSQL Database service via Backend API
 import { API_ORIGIN } from './apiConfig';
 
-export class D1DatabaseService {
-  private static instance: D1DatabaseService;
+export class AivenDatabaseService {
+  private static instance: AivenDatabaseService;
   private baseUrl: string;
   // Render free instances can need more than 15 seconds to wake and establish
   // their first database connection on a mobile network.
@@ -49,11 +49,11 @@ export class D1DatabaseService {
     throw lastError instanceof Error ? lastError : new Error('Unable to reach the backend API.');
   }
 
-  public static getInstance(): D1DatabaseService {
-    if (!D1DatabaseService.instance) {
-      D1DatabaseService.instance = new D1DatabaseService();
+  public static getInstance(): AivenDatabaseService {
+    if (!AivenDatabaseService.instance) {
+      AivenDatabaseService.instance = new AivenDatabaseService();
     }
-    return D1DatabaseService.instance;
+    return AivenDatabaseService.instance;
   }
 
   async testConnection(): Promise<boolean> {
@@ -133,4 +133,4 @@ export class D1DatabaseService {
   }
 }
 
-export const d1Database = D1DatabaseService.getInstance();
+export const aivenDatabase = AivenDatabaseService.getInstance();
