@@ -183,6 +183,14 @@ const SlipImage: React.FC<SlipImageProps> = ({
 
   useEffect(() => {
     if (!src) { setHasError(true); setIsLoading(false); return; }
+    // The transaction list uses this compact marker for legacy inline images.
+    // Its full bytes are requested only by the page when the user opens the slip.
+    if (src.startsWith('lazy-slip:')) {
+      setDisplaySrc(null);
+      setHasError(false);
+      setIsLoading(false);
+      return;
+    }
 
     const resolveImage = async () => {
       if (!isMounted.current) return;
@@ -281,6 +289,22 @@ const SlipImage: React.FC<SlipImageProps> = ({
           <div className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
           <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Loading...</span>
         </div>
+      </div>
+    );
+  }
+
+  // ── Deferred legacy receipt marker ───────────────────────────────────────
+  if (src.startsWith('lazy-slip:')) {
+    return (
+      <div
+        className={`${className} flex flex-col items-center justify-center gap-1 bg-indigo-50 dark:bg-indigo-900/20 rounded-2xl border border-indigo-100 cursor-pointer`}
+        onClick={onClick}
+        title="Tap to load slip"
+      >
+        <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 3h7l3 3v15H7a2 2 0 01-2-2V5a2 2 0 012-2zm7 0v4h4M9 13h6m-6 4h6" />
+        </svg>
+        <span className="text-[8px] text-indigo-500 font-black uppercase tracking-widest">Slip</span>
       </div>
     );
   }

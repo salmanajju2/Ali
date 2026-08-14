@@ -14,6 +14,7 @@ import { PlusIcon } from '../components/icons/PlusIcon';
 import { TrashIcon } from '../components/icons/TrashIcon';
 
 import SlipImage from '../components/SlipImage';
+import { aivenDatabase } from '../services/AivenDatabaseService';
 import { BANK_LOGOS } from '../constants';
 
 const TRANSACTIONS_PER_PAGE = 50;
@@ -169,6 +170,20 @@ const GroupPersonHistoryPage: React.FC = () => {
   const [selectedSlip, setSelectedSlip] = useState<string | null>(null);
   const [resolvedSlipUrl, setResolvedSlipUrl] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(TRANSACTIONS_PER_PAGE);
+
+  const openSlip = async (source: string) => {
+    setResolvedSlipUrl(null);
+    if (!source.startsWith('lazy-slip:')) {
+      setSelectedSlip(source);
+      return;
+    }
+    try {
+      const transaction = await aivenDatabase.getTransaction(source.slice('lazy-slip:'.length));
+      setSelectedSlip(transaction?.slip || null);
+    } catch (error) {
+      console.error('Unable to load the selected receipt:', error);
+    }
+  };
 
   const decodedGroupName = groupName ? decodeURIComponent(groupName) : '';
   const decodedPersonName = personName ? decodeURIComponent(personName) : '';
@@ -371,7 +386,7 @@ const GroupPersonHistoryPage: React.FC = () => {
               isSelected={selectedIds.includes(tx.id)}
               onSelect={(id) => setSelectedIds(ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id])}
               from={location.pathname + location.search}
-              onViewSlip={(url) => setSelectedSlip(url)}
+              onViewSlip={(url) => { void openSlip(url); }}
               onDelete={handleDelete}
             />
           ))}

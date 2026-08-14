@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate, useSearchParams, useLocation } from 'reac
 import { useAppContext } from '../context/AppContext';
 import { Transaction } from '../types';
 import SlipImage from '../components/SlipImage';
+import { aivenDatabase } from '../services/AivenDatabaseService';
 
 // Icons
 import { ArrowLeftIcon } from '../components/icons/ArrowLeftIcon';
@@ -180,6 +181,20 @@ const CompanyHistoryPage: React.FC = () => {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [selectedSlip, setSelectedSlip] = useState<string | null>(null);
   const [resolvedSlipUrl, setResolvedSlipUrl] = useState<string | null>(null);
+
+  const openSlip = async (source: string) => {
+    setResolvedSlipUrl(null);
+    if (!source.startsWith('lazy-slip:')) {
+      setSelectedSlip(source);
+      return;
+    }
+    try {
+      const transaction = await aivenDatabase.getTransaction(source.slice('lazy-slip:'.length));
+      setSelectedSlip(transaction?.slip || null);
+    } catch (error) {
+      console.error('Unable to load the selected receipt:', error);
+    }
+  };
 
   const [searchTerm, setSearchTerm] = useState(searchParams.get('search') || '');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -685,7 +700,7 @@ const CompanyHistoryPage: React.FC = () => {
       {filteredTransactions.length > 0 ? (
         <>
           <div className="space-y-4">
-            {paginatedTransactions.map(tx => <TransactionItem key={tx.id} transaction={tx} isSelected={selectedIds.includes(tx.id)} onSelect={handleSelect} from={location.pathname + location.search} onViewSlip={(url) => setSelectedSlip(url)} onDelete={handleDelete} />)}
+            {paginatedTransactions.map(tx => <TransactionItem key={tx.id} transaction={tx} isSelected={selectedIds.includes(tx.id)} onSelect={handleSelect} from={location.pathname + location.search} onViewSlip={(url) => { void openSlip(url); }} onDelete={handleDelete} />)}
           </div>
           {filteredTransactions.length > visibleCount && (
             <div className="mt-6 text-center">

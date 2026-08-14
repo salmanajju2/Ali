@@ -14,6 +14,7 @@ import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import SlipImage from '../components/SlipImage';
 import SimpleCropper from '../components/SimpleCropper';
+import { aivenDatabase } from '../services/AivenDatabaseService';
 
 const EditTransactionPage: React.FC = () => {
     const { transactionId } = useParams<{ transactionId: string }>();
@@ -75,22 +76,35 @@ const EditTransactionPage: React.FC = () => {
 
         const txToEdit = transactions.find(t => t.id === transactionId);
         if (txToEdit) {
-            setTransaction(txToEdit);
-            setPerson(txToEdit.person || '');
-            setCompany(txToEdit.company || 'NA');
-            setFormLocation(txToEdit.location);
-            setRecordedBy(txToEdit.recordedBy);
-            setTransactionType(txToEdit.type);
-            setAmount(txToEdit.amount);
-            setSelectedBank(txToEdit.bank || '');
-            setSlip(txToEdit.slip || null);
-            setHasSlip(!!txToEdit.slip);
-            setBreakdown(txToEdit.breakdown || {});
+            const populateForm = async () => {
+                let transactionWithSlip = txToEdit;
+                if (txToEdit.slip?.startsWith('lazy-slip:')) {
+                    try {
+                        const detail = await aivenDatabase.getTransaction(txToEdit.id);
+                        if (detail) transactionWithSlip = detail as Transaction;
+                    } catch (loadError) {
+                        console.error('Unable to load transaction receipt for editing:', loadError);
+                    }
+                }
 
-            const dateToUse = txToEdit.manualDate || txToEdit.date || new Date();
-            const localDate = new Date(dateToUse);
-            const localDateString = new Date(localDate.getTime() - localDate.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
-            setManualDate(localDateString);
+                setTransaction(transactionWithSlip);
+                setPerson(transactionWithSlip.person || '');
+                setCompany(transactionWithSlip.company || 'NA');
+                setFormLocation(transactionWithSlip.location);
+                setRecordedBy(transactionWithSlip.recordedBy);
+                setTransactionType(transactionWithSlip.type);
+                setAmount(transactionWithSlip.amount);
+                setSelectedBank(transactionWithSlip.bank || '');
+                setSlip(transactionWithSlip.slip || null);
+                setHasSlip(!!transactionWithSlip.slip);
+                setBreakdown(transactionWithSlip.breakdown || {});
+
+                const dateToUse = transactionWithSlip.manualDate || transactionWithSlip.date || new Date();
+                const localDate = new Date(dateToUse);
+                const localDateString = new Date(localDate.getTime() - localDate.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+                setManualDate(localDateString);
+            };
+            void populateForm();
         } else if (transactions.length > 0) {
             navigate('/history');
         }

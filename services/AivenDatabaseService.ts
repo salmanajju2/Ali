@@ -125,6 +125,19 @@ export class AivenDatabaseService {
     return this.getRecentTransactions(500);
   }
 
+  async getTransaction(id: string | number): Promise<any | null> {
+    try {
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions/${encodeURIComponent(id)}`);
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      return data && typeof data === 'object' ? data : null;
+    } catch (error) {
+      console.error('Error fetching transaction detail from PostgreSQL:', error);
+      throw error;
+    }
+  }
+
   async addTransaction(tx: any): Promise<string | null> {
     try {
       const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions`, {

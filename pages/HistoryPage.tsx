@@ -15,6 +15,7 @@ import { PrinterIcon } from '../components/icons/PrinterIcon';
 import TotalVaultDetails from '../components/TotalVaultDetails';
 import { sendTelegramPhoto } from '../services/telegramService';
 import SlipImage from '../components/SlipImage';
+import { aivenDatabase } from '../services/AivenDatabaseService';
 
 const TRANSACTIONS_PER_PAGE = 50;
 
@@ -56,6 +57,21 @@ const HistoryPage: React.FC = () => {
   const [selectedSlip, setSelectedSlip] = useState<string | null>(null);
   const [resolvedSlipUrl, setResolvedSlipUrl] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(TRANSACTIONS_PER_PAGE);
+
+  const openSlip = async (source: string) => {
+    setResolvedSlipUrl(null);
+    if (!source.startsWith('lazy-slip:')) {
+      setSelectedSlip(source);
+      return;
+    }
+
+    try {
+      const transaction = await aivenDatabase.getTransaction(source.slice('lazy-slip:'.length));
+      setSelectedSlip(transaction?.slip || null);
+    } catch (error) {
+      console.error('Unable to load the selected receipt:', error);
+    }
+  };
 
   useEffect(() => {
     if (isForwardModalOpen) {
@@ -670,7 +686,7 @@ const HistoryPage: React.FC = () => {
                             src={tx.slip}
                             alt="Transaction Slip"
                             className="h-48 w-full object-contain rounded-2xl shadow-lg border-2 border-white dark:border-gray-700 bg-white dark:bg-gray-800 cursor-pointer"
-                            onClick={(e) => { e?.stopPropagation(); setSelectedSlip(tx.slip!); }}
+                            onClick={(e) => { e?.stopPropagation(); void openSlip(tx.slip!); }}
                           />
                           <p className="text-[9px] font-black text-blue-600 mt-2 uppercase tracking-widest text-center">Click to Full View</p>
                         </div>

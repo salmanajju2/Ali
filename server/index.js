@@ -291,12 +291,36 @@ function publishTransactionEvent(action, payload = {}) {
   return event;
 }
 
+// Full detail is used only for a selected receipt or an explicit transaction edit.
 const transactionSelectFields = `
   id::text AS id, date, manual_date AS "manualDate", amount::float8 AS amount,
   type, company, person, notes, payment_method AS "paymentMethod", location,
   recorded_by AS "recordedBy", bank, slip, breakdown,
   is_synced AS "isSynced", is_settlement AS "isSettlement", client_id AS "clientId"
 `;
+
+// Legacy imports contain base64 images inside `slip`. Returning them with every
+// history row made a nominal 500-row sync exceed 7 MB. Keep normal Discord/Telegram
+// references as-is, but replace inline receipt bytes with a tiny marker that the
+// client can resolve through the detail endpoint only when the user opens it.
+const transactionSummaryFields = `
+  id::text AS id, date, manual_date AS "manualDate", amount::float8 AS amount,
+  type, company, person, notes, payment_method AS "paymentMethod", location,
+  recorded_by AS "recordedBy", bank,
+  CASE
+    WHEN slip IS NULL OR slip = '' THEN NULL
+    WHEN slip LIKE 'data:%' THEN 'lazy-slip:' || id::text
+    ELSE slip
+  END AS slip,
+  breakdown, is_synced AS "isSynced", is_settlement AS "isSettlement", client_id AS "clientId"
+`;
+
+function transactionForRealtime(transaction) {
+  if (transaction?.slip && String(transaction.slip).startsWith('data:')) {
+    return { ...transaction, slip: `lazy-slip:${transaction.id}` };
+  }
+  return transaction;
+}
 
 function parseTransactionLimit(value, fallback = -1) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -310,7 +334,7 @@ app.get('/api/transactions/recent', async (req, res) => {
   const limit = parseTransactionLimit(req.query.limit, 500);
   await withDatabase(res, async () => {
     const result = await pool.query(`
-      SELECT ${transactionSelectFields}
+      SELECT ${transactionSummaryFields}
       FROM transactions
       ORDER BY id DESC
       LIMIT $1
@@ -333,7 +357,7 @@ app.get('/api/transactions', async (req, res) => {
     predicates.push(`id < $${values.length}`);
   }
 
-  let query = `SELECT ${transactionSelectFields} FROM transactions`;
+  let query = `SELECT ${transactionSummaryFields} FROM transactions`;
   if (predicates.length > 0) query += ` WHERE ${predicates.join(' AND ')}`;
   query += ' ORDER BY id DESC';
 
@@ -375,8 +399,25 @@ app.post('/api/transactions', async (req, res) => {
     const transaction = result.rows[0];
     // The REST mutation is authoritative. Broadcast only after Aiven PostgreSQL
     // has returned the committed row, so every client receives the same data.
-    publishTransactionEvent('add', { transaction });
+    publishTransactionEvent('add', { transaction: transactionForRealtime(transaction) });
     res.status(201).json({ id: transaction.id, ok: true });
+  });
+});
+
+// A receipt is fetched only when the user explicitly opens or edits that row.
+app.get('/api/transactions/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'A valid transaction id is required.' });
+  }
+  await withDatabase(res, async () => {
+    const result = await pool.query(`
+      SELECT ${transactionSelectFields}
+      FROM transactions
+      WHERE id = $1
+    `, [id]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Transaction not found.' });
+    res.json(result.rows[0]);
   });
 });
 
@@ -391,7 +432,8 @@ app.put('/api/transactions/:id', async (req, res) => {
       UPDATE transactions SET
         date=$1, manual_date=$2, amount=$3, type=$4, company=$5, person=$6,
         notes=$7, payment_method=$8, location=$9, recorded_by=$10, bank=$11,
-        slip=$12, breakdown=$13::jsonb, is_settlement=$14, client_id=$15
+        slip=CASE WHEN $12 LIKE 'lazy-slip:%' THEN slip ELSE $12 END,
+        breakdown=$13::jsonb, is_settlement=$14, client_id=$15
       WHERE id=$16
       RETURNING
         id::text AS id, date, manual_date AS "manualDate", amount::float8 AS amount,
@@ -410,7 +452,7 @@ app.put('/api/transactions/:id', async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Transaction not found.' });
     const transaction = result.rows[0];
     // Broadcast the committed PostgreSQL row only after a successful update.
-    publishTransactionEvent('update', { transaction });
+    publishTransactionEvent('update', { transaction: transactionForRealtime(transaction) });
     res.json({ id: transaction.id, ok: true });
   });
 });
