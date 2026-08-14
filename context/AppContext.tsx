@@ -436,14 +436,23 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   }, [currentUser, userIdentityKeys]);
 
   const calculatedVault = useMemo(() => recalculateVault(allTransactions), [allTransactions, recalculateVault]);
-  const vault = useMemo(() => {
-    // The database table is global, so expose it only in the administrator's
-    // existing all-company vault view. Non-admin users keep their own scoped tally.
-    if (isAdminUser(currentUser) && databaseVault) {
-      return { ...initializeVault(), ...databaseVault };
+  const refreshScopedDatabaseVault = () => {
+    if (!currentUser) {
+      setDatabaseVault(null);
+      return Promise.resolve();
     }
-    return calculatedVault;
-  }, [currentUser, databaseVault, calculatedVault]);
+    const inventoryRequest = isAdminUser(currentUser)
+      ? aivenDatabase.getCashNoteInventory()
+      : aivenDatabase.getUserCashNoteInventory(getUserIdentityKeys(currentUser));
+    return inventoryRequest
+      .then(inventory => setDatabaseVault({ ...initializeVault(), ...inventory.counts }))
+      .catch(error => console.warn('Cash note inventory refresh failed:', error));
+  };
+  const vault = useMemo(() => {
+    // databaseVault is already scoped to the signed-in user (or the admin's
+    // all-company table), so the Total Vault tab reads just seven DB rows.
+    return databaseVault ? { ...initializeVault(), ...databaseVault } : calculatedVault;
+  }, [databaseVault, calculatedVault]);
   const bankBalances = useMemo(() => recalculateBankBalances(allTransactions), [allTransactions, recalculateBankBalances]);
 
   const personNames = useMemo(() => {
@@ -669,9 +678,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         console.log('📥 Initial Sync: fetching the newest 1,000 Aiven PostgreSQL records.');
         const fetched: Transaction[] = await aivenDatabase.getRecentTransactions(1_000);
         // Seven rows only: this never delays the first transaction screen.
-        void aivenDatabase.getCashNoteInventory()
-          .then(inventory => setDatabaseVault({ ...initializeVault(), ...inventory.counts }))
-          .catch(error => console.warn('Initial cash note inventory sync failed:', error));
+        void refreshScopedDatabaseVault();
 
         setDatabaseConnected(true);
 
@@ -832,9 +839,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // Inventory is a seven-row response and stays independent from the large
         // transaction history request, so a temporary inventory failure cannot
         // block normal transaction synchronization.
-        void aivenDatabase.getCashNoteInventory()
-          .then(inventory => setDatabaseVault({ ...initializeVault(), ...inventory.counts }))
-          .catch(error => console.warn('Cash note inventory refresh failed:', error));
+        void refreshScopedDatabaseVault();
         const syncedFromAiven = fetched.map(tx => ({ ...tx, isSynced: true }));
         const localPriorityIds = new Set([
           ...pendingUpdateIdsRef.current,
@@ -911,10 +916,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     realtimeSync.setSyncCallback(async (remoteData: any) => {
       if (remoteData && remoteData.action) {
         console.log(`📡 Instant update received: ${remoteData.action}`);
-        // REST-confirmed server events include the post-mutation inventory
-        // snapshot, so the Vault total changes instantly on every device.
-        if (remoteData.noteInventory?.counts && typeof remoteData.noteInventory.counts === 'object') {
+        // Admin gets the server's aggregate snapshot directly. A normal user
+        // reloads only their own seven inventory rows, so no other user's notes
+        // ever become part of their Total Vault display.
+        if (isAdminUser(currentUser) && remoteData.noteInventory?.counts && typeof remoteData.noteInventory.counts === 'object') {
           setDatabaseVault({ ...initializeVault(), ...remoteData.noteInventory.counts });
+        } else {
+          void refreshScopedDatabaseVault();
         }
 
         // Reconnect par ya manual reconciliation par full database refresh karo.

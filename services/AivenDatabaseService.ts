@@ -148,6 +148,31 @@ export class AivenDatabaseService {
     }
   }
 
+  async getUserCashNoteInventory(identityKeys: Iterable<string>): Promise<{ counts: Record<number, number>; totalValue: number; updatedAt?: string | null }> {
+    try {
+      const params = new URLSearchParams();
+      [...identityKeys].filter(Boolean).slice(0, 8).forEach(identity => params.append('identity', identity));
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/cash-note-inventory/user?${params.toString()}`);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      const rawCounts = data?.counts && typeof data.counts === 'object' ? data.counts : {};
+      const counts: Record<number, number> = {};
+      Object.entries(rawCounts).forEach(([denomination, count]) => {
+        const key = Number(denomination);
+        const value = Number(count);
+        if (Number.isFinite(key) && Number.isFinite(value)) counts[key] = value;
+      });
+      return {
+        counts,
+        totalValue: Number(data?.totalValue) || 0,
+        updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : null,
+      };
+    } catch (error) {
+      console.error('Error fetching user cash note inventory from PostgreSQL:', error);
+      throw error;
+    }
+  }
+
   async getTransaction(id: string | number): Promise<any | null> {
     try {
       const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions/${encodeURIComponent(id)}`);

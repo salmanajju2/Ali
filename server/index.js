@@ -268,6 +268,108 @@ async function ensureTransactionSchema() {
     SELECT app_apply_cash_note_inventory(payment_method, type, breakdown, 1)
     FROM transactions
   `);
+
+  // Each recorder gets their own seven-row cash inventory. Owner keys are the
+  // same compact identity rule already used by the client to match old and new
+  // recordedBy formats (e.g. spaces/case differences cannot split one user).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cash_note_inventory_by_user (
+      owner_key TEXT NOT NULL CHECK (owner_key <> ''),
+      denomination INTEGER NOT NULL CHECK (denomination IN (500, 200, 100, 50, 20, 10, 1)),
+      note_count BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (owner_key, denomination)
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS cash_note_inventory_by_user_updated_at_idx ON cash_note_inventory_by_user(updated_at DESC)');
+
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION app_cash_inventory_owner_key(p_recorded_by TEXT)
+    RETURNS TEXT
+    LANGUAGE SQL
+    IMMUTABLE
+    AS $$
+      SELECT regexp_replace(lower(trim(COALESCE(p_recorded_by, ''))), '[^a-z0-9@.]', '', 'g')
+    $$
+  `);
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION app_apply_user_cash_note_inventory(
+      p_recorded_by TEXT,
+      p_payment_method TEXT,
+      p_type TEXT,
+      p_breakdown JSONB,
+      p_multiplier INTEGER DEFAULT 1
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      owner_key TEXT := app_cash_inventory_owner_key(p_recorded_by);
+      direction INTEGER;
+    BEGIN
+      IF owner_key = '' OR COALESCE(lower(p_payment_method), '') <> 'cash' THEN
+        RETURN;
+      END IF;
+
+      direction := CASE lower(COALESCE(p_type, ''))
+        WHEN 'credit' THEN 1
+        WHEN 'debit' THEN -1
+        ELSE 0
+      END;
+      IF direction = 0 THEN
+        RETURN;
+      END IF;
+
+      INSERT INTO cash_note_inventory_by_user (owner_key, denomination, note_count, updated_at)
+      SELECT
+        owner_key,
+        entry.key::INTEGER,
+        entry.value::BIGINT * direction * p_multiplier,
+        CURRENT_TIMESTAMP
+      FROM jsonb_each_text(COALESCE(p_breakdown, '{}'::jsonb)) AS entry(key, value)
+      WHERE entry.key ~ '^(500|200|100|50|20|10|1)$'
+        AND entry.value ~ '^[+-]?[0-9]+$'
+      ON CONFLICT (owner_key, denomination) DO UPDATE
+      SET note_count = cash_note_inventory_by_user.note_count + EXCLUDED.note_count,
+          updated_at = CURRENT_TIMESTAMP;
+    END;
+    $$
+  `);
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION app_sync_user_cash_note_inventory_trigger()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        PERFORM app_apply_user_cash_note_inventory(NEW.recorded_by, NEW.payment_method, NEW.type, NEW.breakdown, 1);
+        RETURN NEW;
+      ELSIF TG_OP = 'UPDATE' THEN
+        PERFORM app_apply_user_cash_note_inventory(OLD.recorded_by, OLD.payment_method, OLD.type, OLD.breakdown, -1);
+        PERFORM app_apply_user_cash_note_inventory(NEW.recorded_by, NEW.payment_method, NEW.type, NEW.breakdown, 1);
+        RETURN NEW;
+      ELSIF TG_OP = 'DELETE' THEN
+        PERFORM app_apply_user_cash_note_inventory(OLD.recorded_by, OLD.payment_method, OLD.type, OLD.breakdown, -1);
+        RETURN OLD;
+      END IF;
+      RETURN NULL;
+    END;
+    $$
+  `);
+  await pool.query('DROP TRIGGER IF EXISTS cash_note_inventory_user_transaction_sync ON transactions');
+  await pool.query(`
+    CREATE TRIGGER cash_note_inventory_user_transaction_sync
+    AFTER INSERT OR UPDATE OR DELETE ON transactions
+    FOR EACH ROW EXECUTE FUNCTION app_sync_user_cash_note_inventory_trigger()
+  `);
+
+  // One startup backfill makes every existing recorder's balance available as
+  // a direct table lookup. Normal app use only applies O(number of notes) deltas.
+  await pool.query('DELETE FROM cash_note_inventory_by_user');
+  await pool.query(`
+    SELECT app_apply_user_cash_note_inventory(recorded_by, payment_method, type, breakdown, 1)
+    FROM transactions
+  `);
 }
 
 const schemaReady = ensureTransactionSchema().catch((err) => {
@@ -402,6 +504,54 @@ async function getCashNoteInventorySnapshot() {
 app.get('/api/cash-note-inventory', async (_req, res) => {
   await withDatabase(res, async () => {
     res.json(await getCashNoteInventorySnapshot());
+  });
+});
+
+function normalizeCashInventoryOwnerKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9@.]/g, '');
+}
+
+async function getUserCashNoteInventorySnapshot(identityValues) {
+  const ownerKeys = [...new Set(
+    identityValues.map(normalizeCashInventoryOwnerKey).filter(Boolean)
+  )].slice(0, 8);
+  const result = await pool.query(`
+    WITH denominations(denomination) AS (VALUES (500), (200), (100), (50), (20), (10), (1))
+    SELECT
+      denominations.denomination,
+      COALESCE(SUM(inventory.note_count), 0)::float8 AS count,
+      MAX(inventory.updated_at) AS "updatedAt"
+    FROM denominations
+    LEFT JOIN cash_note_inventory_by_user AS inventory
+      ON inventory.denomination = denominations.denomination
+      AND inventory.owner_key = ANY($1::text[])
+    GROUP BY denominations.denomination
+    ORDER BY denominations.denomination DESC
+  `, [ownerKeys]);
+
+  const counts = {};
+  let totalValue = 0;
+  let updatedAt = null;
+  for (const row of result.rows) {
+    const denomination = Number(row.denomination);
+    const count = Number(row.count) || 0;
+    counts[denomination] = count;
+    totalValue += denomination * count;
+    if (row.updatedAt && (!updatedAt || new Date(row.updatedAt).getTime() > new Date(updatedAt).getTime())) {
+      updatedAt = row.updatedAt;
+    }
+  }
+  return { counts, totalValue, updatedAt };
+}
+
+// The client supplies its Firebase display-name/email aliases. The database
+// returns the union of only those recorder balances, never all transactions.
+app.get('/api/cash-note-inventory/user', async (req, res) => {
+  await withDatabase(res, async () => {
+    const requested = Array.isArray(req.query.identity)
+      ? req.query.identity
+      : (req.query.identity ? [req.query.identity] : []);
+    res.json(await getUserCashNoteInventorySnapshot(requested));
   });
 });
 
