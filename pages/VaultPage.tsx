@@ -10,7 +10,7 @@ const VaultPage: React.FC = () => {
   const { vault, transactions } = useAppContext();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const [view, setView] = useState<'total' | 'today' | 'activity'>('total');
+  const [view, setView] = useState<'total' | 'activity'>('total');
   
   const [filterYear, setFilterYear] = useState(searchParams.get('year') || 'all');
   const [filterMonth, setFilterMonth] = useState(searchParams.get('month') || 'all');
@@ -110,40 +110,6 @@ const VaultPage: React.FC = () => {
       };
     }
     
-    if (view === 'today') {
-      const todayVault: NoteCounts = {};
-      DENOMINATIONS.forEach(d => todayVault[d] = 0);
-      const now = new Date();
-      const todayY = now.getFullYear();
-      const todayM = now.getMonth();
-      const todayD = now.getDate();
-      cashTransactions.forEach(tx => {
-        const d = new Date(tx.date);
-        if (!isNaN(d.getTime()) && d.getFullYear() === todayY && d.getMonth() === todayM && d.getDate() === todayD) {
-          if (tx.breakdown && typeof tx.breakdown === 'object') {
-            for (const denomStr in tx.breakdown) {
-              const denom = parseInt(denomStr, 10);
-              const count = tx.breakdown[denom] || 0;
-              if (DENOMINATIONS.includes(denom)) {
-                if (tx.type === 'credit') {
-                  todayVault[denom] = (todayVault[denom] || 0) + count;
-                } else if (tx.type === 'debit') {
-                  todayVault[denom] = (todayVault[denom] || 0) - count;
-                }
-              }
-            }
-          }
-        }
-      });
-      const totalValue = DENOMINATIONS.reduce((sum, denom) => sum + (todayVault[denom] || 0) * denom, 0);
-      return {
-        vaultToDisplay: todayVault,
-        title: "Today's Total Notes",
-        totalTitle: "Today's Net Cash Value",
-        totalValue,
-      };
-    }
-
     // Activity View
     const totalValue = DENOMINATIONS.reduce((sum, denom) => sum + (filteredActivityVault[denom] || 0) * denom, 0);
     let title = "Vault Activity";
@@ -190,13 +156,6 @@ const VaultPage: React.FC = () => {
             style={view === 'total' ? {background:'white',color:'#6366F1',boxShadow:'0 2px 8px rgba(99,102,241,0.15)'} : {background:'transparent',color:'#9CA3AF'}}
           >
             Total Vault
-          </button>
-          <button
-            onClick={() => setView('today')}
-            className={`flex-1 py-2.5 rounded-lg text-[10px] md:text-xs font-black uppercase tracking-widest transition-all`}
-            style={view === 'today' ? {background:'white',color:'#6366F1',boxShadow:'0 2px 8px rgba(99,102,241,0.15)'} : {background:'transparent',color:'#9CA3AF'}}
-          >
-            Today Notes
           </button>
           <button
             onClick={() => setView('activity')}
