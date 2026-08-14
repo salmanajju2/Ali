@@ -111,8 +111,28 @@ async function ensureTransactionSchema() {
       ADD COLUMN IF NOT EXISTS is_settlement BOOLEAN DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS client_id TEXT,
       ADD COLUMN IF NOT EXISTS recorded_by TEXT,
-      ADD COLUMN IF NOT EXISTS payment_method TEXT
+      ADD COLUMN IF NOT EXISTS payment_method TEXT,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
   `);
+  await pool.query(`UPDATE transactions SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL`);
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION app_touch_transaction_updated_at()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      NEW.updated_at = CURRENT_TIMESTAMP;
+      RETURN NEW;
+    END;
+    $$
+  `);
+  await pool.query(`DROP TRIGGER IF EXISTS touch_transactions_updated_at ON transactions`);
+  await pool.query(`
+    CREATE TRIGGER touch_transactions_updated_at
+    BEFORE INSERT OR UPDATE ON transactions
+    FOR EACH ROW EXECUTE FUNCTION app_touch_transaction_updated_at()
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS transactions_updated_at_idx ON transactions(updated_at DESC)`);
 
   // Older legacy imports stored breakdown as TEXT. Convert the column once,
   // preserving valid JSON and safely replacing malformed legacy values with {}.
@@ -610,7 +630,7 @@ function parseTransactionLimit(value, fallback = -1) {
 // Small, bounded response used by APK startup and routine reconciliation.
 // The newest records have the largest IDs because PostgreSQL assigns IDs on insert.
 app.get('/api/transactions/recent', async (req, res) => {
-  const limit = parseTransactionLimit(req.query.limit, 500);
+  const limit = Math.min(parseInt(req.query.limit) || 500, 2000);
   await withDatabase(res, async () => {
     const result = await pool.query(`
       SELECT ${transactionSummaryFields}
@@ -618,6 +638,22 @@ app.get('/api/transactions/recent', async (req, res) => {
       ORDER BY id DESC
       LIMIT $1
     `, [limit]);
+    res.json(result.rows);
+  });
+});
+
+// Endpoint to fetch transactions modified since a given timestamp (for direct SQL edits)
+app.get('/api/transactions/modified-since', async (req, res) => {
+  const since = req.query.since ? new Date(String(req.query.since)) : new Date(0);
+  const limit = Math.min(parseInt(req.query.limit) || 200, 1000);
+  await withDatabase(res, async () => {
+    const result = await pool.query(`
+      SELECT ${transactionSummaryFields}, updated_at AS "updatedAt"
+      FROM transactions
+      WHERE updated_at > $1
+      ORDER BY updated_at ASC
+      LIMIT $2
+    `, [isNaN(since.getTime()) ? new Date(0) : since, limit]);
     res.json(result.rows);
   });
 });

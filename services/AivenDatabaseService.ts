@@ -102,6 +102,19 @@ export class AivenDatabaseService {
     }
   }
 
+  async getTransactionsModifiedSince(sinceIsoString: string): Promise<any[]> {
+    try {
+      const query = sinceIsoString ? `?since=${encodeURIComponent(sinceIsoString)}` : '';
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions/modified-since${query}`);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    } catch (error) {
+      console.warn('Failed to fetch modified transactions:', error);
+      return [];
+    }
+  }
+
   async getTransactionPage(limit = 500, beforeId?: string | number): Promise<any[]> {
     try {
       const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 2_000);

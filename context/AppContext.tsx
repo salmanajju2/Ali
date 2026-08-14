@@ -831,11 +831,26 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
         }
 
-        // Reconcile a bounded newest window. Server-confirmed mutations arrive by
-        // Socket.IO, while this request repairs missed Android WebView events without
-        // downloading and rewriting the complete 10k-row cache every few seconds.
+        // Reconcile recent transactions AND any records modified directly in SQL database
         const recentlyUpdatedIds = new Set(recentlyUpdatedIdsRef.current);
-        const fetched = await aivenDatabase.getRecentTransactions(500);
+        // Track last check time for modified-since reconciliation
+        const lastSyncKey = 'ali_last_modified_sync_ts';
+        const lastSyncTs = localStorage.getItem(lastSyncKey) || new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        const fetchStartTime = new Date().toISOString();
+
+        const [fetchedRecent, fetchedModified] = await Promise.all([
+          aivenDatabase.getRecentTransactions(500),
+          aivenDatabase.getTransactionsModifiedSince(lastSyncTs),
+        ]);
+
+        localStorage.setItem(lastSyncKey, fetchStartTime);
+
+        // Merge recent and modified records uniquely
+        const txMap = new Map<string, any>();
+        fetchedRecent.forEach(tx => txMap.set(String(tx.id), tx));
+        fetchedModified.forEach(tx => txMap.set(String(tx.id), tx));
+        const fetched = Array.from(txMap.values());
+
         // Inventory is a seven-row response and stays independent from the large
         // transaction history request, so a temporary inventory failure cannot
         // block normal transaction synchronization.
