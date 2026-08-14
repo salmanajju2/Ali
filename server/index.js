@@ -169,6 +169,105 @@ async function ensureTransactionSchema() {
     )
   `);
   await pool.query('CREATE INDEX IF NOT EXISTS app_sessions_user_id_idx ON app_sessions(user_id)');
+
+  // The cash-note inventory is the authoritative cumulative count behind the
+  // Vault screen. It mirrors cash transaction breakdowns at the database layer,
+  // so it remains correct even when transactions are added, edited, or deleted
+  // from a different phone, the web app, or an offline sync replay.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cash_note_inventory (
+      denomination INTEGER PRIMARY KEY CHECK (denomination IN (500, 200, 100, 50, 20, 10, 1)),
+      note_count BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`
+    INSERT INTO cash_note_inventory (denomination, note_count)
+    VALUES (500, 0), (200, 0), (100, 0), (50, 0), (20, 0), (10, 0), (1, 0)
+    ON CONFLICT (denomination) DO NOTHING
+  `);
+
+  // Only whole signed counts are accepted by the denomination UI. This helper
+  // applies a transaction's cash effect (+credit / -debit) to the current table.
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION app_apply_cash_note_inventory(
+      p_payment_method TEXT,
+      p_type TEXT,
+      p_breakdown JSONB,
+      p_multiplier INTEGER DEFAULT 1
+    )
+    RETURNS VOID
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      direction INTEGER;
+    BEGIN
+      IF COALESCE(lower(p_payment_method), '') <> 'cash' THEN
+        RETURN;
+      END IF;
+
+      direction := CASE lower(COALESCE(p_type, ''))
+        WHEN 'credit' THEN 1
+        WHEN 'debit' THEN -1
+        ELSE 0
+      END;
+      IF direction = 0 THEN
+        RETURN;
+      END IF;
+
+      INSERT INTO cash_note_inventory (denomination, note_count, updated_at)
+      SELECT
+        entry.key::INTEGER,
+        entry.value::BIGINT * direction * p_multiplier,
+        CURRENT_TIMESTAMP
+      FROM jsonb_each_text(COALESCE(p_breakdown, '{}'::jsonb)) AS entry(key, value)
+      WHERE entry.key ~ '^(500|200|100|50|20|10|1)$'
+        AND entry.value ~ '^[+-]?[0-9]+$'
+      ON CONFLICT (denomination) DO UPDATE
+      SET note_count = cash_note_inventory.note_count + EXCLUDED.note_count,
+          updated_at = CURRENT_TIMESTAMP;
+    END;
+    $$
+  `);
+
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION app_sync_cash_note_inventory_trigger()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        PERFORM app_apply_cash_note_inventory(NEW.payment_method, NEW.type, NEW.breakdown, 1);
+        RETURN NEW;
+      ELSIF TG_OP = 'UPDATE' THEN
+        -- Reverse the old breakdown first, then apply the edited replacement.
+        PERFORM app_apply_cash_note_inventory(OLD.payment_method, OLD.type, OLD.breakdown, -1);
+        PERFORM app_apply_cash_note_inventory(NEW.payment_method, NEW.type, NEW.breakdown, 1);
+        RETURN NEW;
+      ELSIF TG_OP = 'DELETE' THEN
+        -- Deleting a transaction reverses precisely its old note contribution.
+        PERFORM app_apply_cash_note_inventory(OLD.payment_method, OLD.type, OLD.breakdown, -1);
+        RETURN OLD;
+      END IF;
+      RETURN NULL;
+    END;
+    $$
+  `);
+  await pool.query('DROP TRIGGER IF EXISTS cash_note_inventory_transaction_sync ON transactions');
+  await pool.query(`
+    CREATE TRIGGER cash_note_inventory_transaction_sync
+    AFTER INSERT OR UPDATE OR DELETE ON transactions
+    FOR EACH ROW EXECUTE FUNCTION app_sync_cash_note_inventory_trigger()
+  `);
+
+  // Rebuild during deployment/startup so all historic Aiven transactions become
+  // the opening balance. Afterwards the trigger keeps this table in sync without
+  // rescanning the full history on every app request.
+  await pool.query('UPDATE cash_note_inventory SET note_count = 0, updated_at = CURRENT_TIMESTAMP');
+  await pool.query(`
+    SELECT app_apply_cash_note_inventory(payment_method, type, breakdown, 1)
+    FROM transactions
+  `);
 }
 
 const schemaReady = ensureTransactionSchema().catch((err) => {
@@ -276,6 +375,36 @@ app.post('/api/auth/logout', async (req, res) => {
 });
 
 // 5. REST API for Transactions (Aiven PostgreSQL)
+async function getCashNoteInventorySnapshot() {
+  const result = await pool.query(`
+    SELECT denomination, note_count::float8 AS count, updated_at AS "updatedAt"
+    FROM cash_note_inventory
+    ORDER BY denomination DESC
+  `);
+  const counts = {};
+  let totalValue = 0;
+  let updatedAt = null;
+  for (const row of result.rows) {
+    const denomination = Number(row.denomination);
+    const count = Number(row.count) || 0;
+    counts[denomination] = count;
+    totalValue += denomination * count;
+    if (!updatedAt || new Date(row.updatedAt).getTime() > new Date(updatedAt).getTime()) {
+      updatedAt = row.updatedAt;
+    }
+  }
+  return { counts, totalValue, updatedAt };
+}
+
+// This endpoint transfers only seven denomination rows. It is used for the
+// authoritative total-vault display; date-filtered activity continues to be
+// calculated from the currently visible transaction list on the client.
+app.get('/api/cash-note-inventory', async (_req, res) => {
+  await withDatabase(res, async () => {
+    res.json(await getCashNoteInventorySnapshot());
+  });
+});
+
 // Only this server-side helper publishes transaction mutations. The REST route
 // calls it after PostgreSQL returns a committed row (or confirmed deletion), so
 // an APK or web client can never broadcast an unconfirmed local mutation.
@@ -399,8 +528,9 @@ app.post('/api/transactions', async (req, res) => {
     const transaction = result.rows[0];
     // The REST mutation is authoritative. Broadcast only after Aiven PostgreSQL
     // has returned the committed row, so every client receives the same data.
-    publishTransactionEvent('add', { transaction: transactionForRealtime(transaction) });
-    res.status(201).json({ id: transaction.id, ok: true });
+    const noteInventory = await getCashNoteInventorySnapshot();
+    publishTransactionEvent('add', { transaction: transactionForRealtime(transaction), noteInventory });
+    res.status(201).json({ id: transaction.id, noteInventory, ok: true });
   });
 });
 
@@ -452,8 +582,9 @@ app.put('/api/transactions/:id', async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Transaction not found.' });
     const transaction = result.rows[0];
     // Broadcast the committed PostgreSQL row only after a successful update.
-    publishTransactionEvent('update', { transaction: transactionForRealtime(transaction) });
-    res.json({ id: transaction.id, ok: true });
+    const noteInventory = await getCashNoteInventorySnapshot();
+    publishTransactionEvent('update', { transaction: transactionForRealtime(transaction), noteInventory });
+    res.json({ id: transaction.id, noteInventory, ok: true });
   });
 });
 
@@ -468,8 +599,9 @@ app.delete('/api/transactions/:id', async (req, res) => {
 
     // Broadcast only after PostgreSQL confirms the deletion. This avoids the old
     // race where another device refreshed before the record was actually removed.
-    publishTransactionEvent('delete', { ids: [String(id)] });
-    res.json({ ok: true });
+    const noteInventory = await getCashNoteInventorySnapshot();
+    publishTransactionEvent('delete', { ids: [String(id)], noteInventory });
+    res.json({ noteInventory, ok: true });
   });
 });
 

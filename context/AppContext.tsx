@@ -210,6 +210,9 @@ const deduplicateTransactions = (list: Transaction[]): Transaction[] => {
 export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const { currentUser } = useAuth();
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
+  // The PostgreSQL inventory is the authoritative all-history vault for the
+  // administrator. Other users retain their privacy-scoped local calculation.
+  const [databaseVault, setDatabaseVault] = useState<NoteCounts | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
 
@@ -432,7 +435,15 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     return newVault;
   }, [currentUser, userIdentityKeys]);
 
-  const vault = useMemo(() => recalculateVault(allTransactions), [allTransactions, recalculateVault]);
+  const calculatedVault = useMemo(() => recalculateVault(allTransactions), [allTransactions, recalculateVault]);
+  const vault = useMemo(() => {
+    // The database table is global, so expose it only in the administrator's
+    // existing all-company vault view. Non-admin users keep their own scoped tally.
+    if (isAdminUser(currentUser) && databaseVault) {
+      return { ...initializeVault(), ...databaseVault };
+    }
+    return calculatedVault;
+  }, [currentUser, databaseVault, calculatedVault]);
   const bankBalances = useMemo(() => recalculateBankBalances(allTransactions), [allTransactions, recalculateBankBalances]);
 
   const personNames = useMemo(() => {
@@ -657,6 +668,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         aivenDatabase.initializeDatabase().catch(e => console.warn('DB init error (background):', e));
         console.log('📥 Initial Sync: fetching the newest 1,000 Aiven PostgreSQL records.');
         const fetched: Transaction[] = await aivenDatabase.getRecentTransactions(1_000);
+        // Seven rows only: this never delays the first transaction screen.
+        void aivenDatabase.getCashNoteInventory()
+          .then(inventory => setDatabaseVault({ ...initializeVault(), ...inventory.counts }))
+          .catch(error => console.warn('Initial cash note inventory sync failed:', error));
 
         setDatabaseConnected(true);
 
@@ -814,6 +829,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // downloading and rewriting the complete 10k-row cache every few seconds.
         const recentlyUpdatedIds = new Set(recentlyUpdatedIdsRef.current);
         const fetched = await aivenDatabase.getRecentTransactions(500);
+        // Inventory is a seven-row response and stays independent from the large
+        // transaction history request, so a temporary inventory failure cannot
+        // block normal transaction synchronization.
+        void aivenDatabase.getCashNoteInventory()
+          .then(inventory => setDatabaseVault({ ...initializeVault(), ...inventory.counts }))
+          .catch(error => console.warn('Cash note inventory refresh failed:', error));
         const syncedFromAiven = fetched.map(tx => ({ ...tx, isSynced: true }));
         const localPriorityIds = new Set([
           ...pendingUpdateIdsRef.current,
@@ -890,6 +911,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     realtimeSync.setSyncCallback(async (remoteData: any) => {
       if (remoteData && remoteData.action) {
         console.log(`📡 Instant update received: ${remoteData.action}`);
+        // REST-confirmed server events include the post-mutation inventory
+        // snapshot, so the Vault total changes instantly on every device.
+        if (remoteData.noteInventory?.counts && typeof remoteData.noteInventory.counts === 'object') {
+          setDatabaseVault({ ...initializeVault(), ...remoteData.noteInventory.counts });
+        }
 
         // Reconnect par ya manual reconciliation par full database refresh karo.
         // Yeh missed background events ko APK mein wapas le aata hai.
