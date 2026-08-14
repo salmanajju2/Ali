@@ -85,6 +85,23 @@ class IndexedDBService {
     });
   }
 
+  public async saveTransactions(transactions: Transaction[]): Promise<void> {
+    if (transactions.length === 0) return;
+    const db = await this.getDB();
+    return new Promise((resolve, reject) => {
+      const transactionObj = db.transaction([STORE_NAME], 'readwrite');
+      const store = transactionObj.objectStore(STORE_NAME);
+
+      for (const record of transactions) {
+        if (record?.id) store.put(record);
+      }
+
+      transactionObj.oncomplete = () => resolve();
+      transactionObj.onerror = (event: any) => reject(event.target.error);
+      transactionObj.onabort = (event: any) => reject(event.target.error || new Error('IndexedDB batch write aborted'));
+    });
+  }
+
   public async getTransactions(): Promise<Transaction[]> {
     try {
       const db = await this.getDB();

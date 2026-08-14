@@ -74,9 +74,10 @@ export class AivenDatabaseService {
     return { success: true };
   }
 
-  async getAllTransactions(_limit = -1): Promise<any[]> {
+  async getAllTransactions(limit = -1): Promise<any[]> {
     try {
-      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions`);
+      const query = limit > 0 ? `?limit=${encodeURIComponent(limit)}` : '';
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions${query}`);
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       const data = await response.json();
       return Array.isArray(data) ? data : [];
@@ -86,8 +87,42 @@ export class AivenDatabaseService {
     }
   }
 
+  async getRecentTransactions(limit = 500): Promise<any[]> {
+    try {
+      const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 2_000);
+      const response = await this.fetchWithTimeout(
+        `${this.baseUrl}/api/transactions/recent?limit=${encodeURIComponent(safeLimit)}`
+      );
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    } catch (error) {
+      console.error('Error fetching recent transactions from PostgreSQL:', error);
+      throw error;
+    }
+  }
+
+  async getTransactionPage(limit = 500, beforeId?: string | number): Promise<any[]> {
+    try {
+      const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 2_000);
+      const params = new URLSearchParams({ limit: String(safeLimit) });
+      if (beforeId !== undefined && beforeId !== null && String(beforeId) !== '') {
+        params.set('beforeId', String(beforeId));
+      }
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions?${params.toString()}`);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    } catch (error) {
+      console.error('Error fetching a transaction page from PostgreSQL:', error);
+      throw error;
+    }
+  }
+
+  // Kept for older call sites. Routine refreshes reconcile only a bounded newest
+  // window; add, update and delete events arrive through Socket.IO immediately.
   async getNewTransactions(_maxId: any): Promise<any[]> {
-    return this.getAllTransactions();
+    return this.getRecentTransactions(500);
   }
 
   async addTransaction(tx: any): Promise<string | null> {

@@ -326,6 +326,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   // Remember that event so the latest database state is fetched immediately after
   // the in-flight request completes instead of silently dropping the refresh.
   const queuedRealtimeRefreshRef = useRef(false);
+  // Only one background history walk may run at a time. It is intentionally
+  // separate from routine reconciliation so a 10k-row import cannot block UI.
+  const historyHydrationInProgressRef = useRef(false);
   const lastFetchTimeRef = useRef<number>(0);
   const allTransactionsRef = useRef<Transaction[]>([]);
   // Track in-flight edits separately from new offline transactions. A real ID with
@@ -648,62 +651,86 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           console.log(`✅ LocalDB se ${sortedLocal.length} transactions loaded.`);
         }
 
-        // Step 2: Aiven PostgreSQL se INCREMENTAL/Full fetch karo depending on local data
-        // initializeDatabase background mein chalao — UI block nahi hogi
+        // Step 2: The first network response is deliberately bounded. Existing
+        // IndexedDB data is shown above immediately; a new APK receives only the
+        // newest slice instead of waiting for all 10,616 rows to deserialize.
         aivenDatabase.initializeDatabase().catch(e => console.warn('DB init error (background):', e));
-
-        const numericIds = localTransactions
-          .map(tx => parseInt(tx.id))
-          .filter(id => !isNaN(id));
-        const maxId = numericIds.length > 0 ? Math.max(...numericIds) : 0;
-
-        let fetched: Transaction[] = [];
-        let isFullSync = false;
-
-        if (localTransactions.length > 0 && maxId > 0) {
-          console.log(`📥 Incremental Initial Sync: fetching updates since maxId ${maxId}`);
-          fetched = await aivenDatabase.getNewTransactions(maxId);
-        } else {
-          console.log(`📥 Initial Sync: Loaded all records from Aiven PostgreSQL (Full Sync).`);
-          fetched = await aivenDatabase.getAllTransactions(-1);
-          isFullSync = true;
-        }
+        console.log('📥 Initial Sync: fetching the newest 1,000 Aiven PostgreSQL records.');
+        const fetched: Transaction[] = await aivenDatabase.getRecentTransactions(1_000);
 
         setDatabaseConnected(true);
 
-        if (fetched && fetched.length > 0) {
+        if (fetched.length > 0) {
           const syncedFromAiven = fetched.map(tx => ({ ...tx, isSynced: true }));
-
           const pendingLocal = localTransactions.filter(tx => !tx.isSynced);
-          const alreadySyncedLocal = localTransactions.filter(tx => tx.isSynced);
-
-          const mergedList = [...syncedFromAiven, ...alreadySyncedLocal, ...pendingLocal];
-          const deduplicatedList = deduplicateTransactions(mergedList);
-          const finalSorted = sortTransactionsByDate(filterDeletedIds(deduplicatedList));
+          const mergedList = [...syncedFromAiven, ...localTransactions.filter(tx => tx.isSynced), ...pendingLocal];
+          const finalSorted = sortTransactionsByDate(filterDeletedIds(deduplicateTransactions(mergedList)));
 
           setAllTransactions(finalSorted);
-          
-          // Aiven is the authoritative transaction store. A stale/blocked
-          // IndexedDB cache must never turn a successful server sync into a
-          // visible Sync failed error on the device.
           try {
-            if (isFullSync) {
-              await localDB.clearAndRepopulateTransactions(finalSorted);
-            } else {
-              // Save only the new/updated transactions incrementally
-              for (const tx of syncedFromAiven) {
-                await localDB.saveTransaction(tx);
-              }
-            }
+            // `put` only the current window. Do not clear and rewrite a 10k cache
+            // on every app open because that is a major Android WebView slowdown.
+            await localDB.saveTransactions(syncedFromAiven);
           } catch (cacheError) {
             console.warn('Local cache update skipped after successful server sync:', cacheError);
           }
-          console.log(`✅ App open sync complete. Loaded ${fetched.length} updates. Total: ${finalSorted.length}`);
+          console.log(`✅ App open sync complete. Reconciled ${fetched.length} recent records. Total visible: ${finalSorted.length}`);
+
+          // Populate older pages after the first screen is usable. Batches of four
+          // pages limit React renders while preserving the complete offline cache.
+          const initialUserId = currentUser.uid;
+          if (!historyHydrationInProgressRef.current && fetched.length >= 1_000) {
+            historyHydrationInProgressRef.current = true;
+            void (async () => {
+              let beforeId = fetched[fetched.length - 1]?.id;
+              let pagesLoaded = 0;
+              let bufferedTransactions: Transaction[] = [];
+              const flushBuffer = () => {
+                if (bufferedTransactions.length === 0) return;
+                const batch = bufferedTransactions;
+                bufferedTransactions = [];
+                setAllTransactions(prev => {
+                  const merged = deduplicateTransactions([...prev, ...batch]);
+                  return sortTransactionsByDate(filterDeletedIds(merged));
+                });
+              };
+
+              try {
+                while (beforeId && currentUserUidRef.current === initialUserId) {
+                  const page = await aivenDatabase.getTransactionPage(500, beforeId);
+                  if (page.length === 0) break;
+
+                  const syncedPage = page.map(tx => ({ ...tx, isSynced: true }));
+                  await localDB.saveTransactions(syncedPage);
+                  bufferedTransactions.push(...syncedPage);
+                  pagesLoaded += 1;
+
+                  const nextBeforeId = page[page.length - 1]?.id;
+                  if (!nextBeforeId || nextBeforeId === beforeId) break;
+                  beforeId = nextBeforeId;
+
+                  if (pagesLoaded % 4 === 0 || page.length < 500) flushBuffer();
+                  // Yield to input/rendering so a long first cache hydrate never
+                  // makes the APK feel frozen.
+                  await new Promise(resolve => window.setTimeout(resolve, 0));
+                  if (page.length < 500) break;
+                }
+                flushBuffer();
+                console.log(`✅ Background history hydration completed: ${pagesLoaded} page(s).`);
+              } catch (historyError) {
+                // Recent data and the existing cache remain usable; the next open
+                // or manual sync continues reconciliation without data loss.
+                console.warn('Background history hydration paused:', historyError);
+                flushBuffer();
+              } finally {
+                historyHydrationInProgressRef.current = false;
+              }
+            })();
+          }
         } else {
-          console.log('ℹ️ No new updates from Aiven PostgreSQL. Using local data.');
+          console.log('ℹ️ No recent records returned from Aiven PostgreSQL. Using local data.');
           if (localTransactions.length > 0) {
-            const finalSorted = sortTransactionsByDate(filterDeletedIds(localTransactions));
-            setAllTransactions(finalSorted);
+            setAllTransactions(sortTransactionsByDate(filterDeletedIds(localTransactions)));
           }
         }
 
@@ -782,111 +809,46 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
         }
 
-        // ✅ FIX: Re-read localTransactions AFTER uploading offline transactions
-        // Pehle localTransactions mein temp_ IDs the, ab server IDs hain — maxId sahi milega
-        const freshLocalTransactions = await localDB.getTransactions();
-        const numericIds = freshLocalTransactions.map(tx => parseInt(tx.id)).filter(id => !isNaN(id));
-        const maxId = numericIds.length > 0 ? Math.max(...numericIds) : 0;
-
-        // ✅ FIX: Agar koi recently updated ID hai, toh force full refresh karo
-        // Incremental sync (getNewTransactions) sirf NAYE records laata hai — updates ko miss karta hai
-        // Updated transactions ka ID same rehta hai (koi nayi row nahi banti)
-        // Isliye full Aiven PostgreSQL fetch zaroori hai taaki updated data sahi aaye
-        // ✅ FIX: IDs snapshot pehle save karo, PHIR clear karo
-        // Warna mergedList build hone tak IDs already clear ho jaate hain
+        // Reconcile a bounded newest window. Server-confirmed mutations arrive by
+        // Socket.IO, while this request repairs missed Android WebView events without
+        // downloading and rewriting the complete 10k-row cache every few seconds.
         const recentlyUpdatedIds = new Set(recentlyUpdatedIdsRef.current);
-        const hasRecentUpdates = recentlyUpdatedIds.size > 0;
-        const shouldForceFull = force || hasRecentUpdates || queuedDeleteResult.confirmedIds.length > 0;
-
-        if (hasRecentUpdates) {
-          console.log(`🔄 ${recentlyUpdatedIds.size} recently updated transaction(s) detected — forcing full Aiven PostgreSQL refresh.`);
-          recentlyUpdatedIdsRef.current.clear(); // Clear karo taaki next cycle mein repeat na ho
-        }
-
-        // Always fetch all transactions to guarantee complete data sync and prevent missing records.
-        const fetched = await aivenDatabase.getAllTransactions(-1);
-
-        if (fetched.length === 0 && !shouldForceFull) {
-          console.log('✅ No new data in polling.');
-          return;
-        }
-
+        const fetched = await aivenDatabase.getRecentTransactions(500);
         const syncedFromAiven = fetched.map(tx => ({ ...tx, isSynced: true }));
+        const localPriorityIds = new Set([
+          ...pendingUpdateIdsRef.current,
+          ...recentlyUpdatedIds,
+          ...pendingDeleteIdsRef.current,
+        ]);
 
-        // ✅ FIX: Use functional update to MERGE with current in-memory state.
-        // This prevents: (1) screen flash when network is slow,
-        // (2) race condition where a just-saved temp_ transaction gets lost.
-        setAllTransactions(prev => {
-          // Pending = transactions in current UI that are NOT yet synced (temp_ / offline)
-          const pendingInMemory = prev.filter(tx => !tx.isSynced);
-
-          let mergedList: Transaction[];
-          if (shouldForceFull || fetchedAll !== null) {
-            const serverIds = new Set(syncedFromAiven.map(tx => tx.id));
-            const localSyncedNotInServer = prev.filter(tx =>
-              tx.isSynced && !serverIds.has(tx.id)
-            );
-
-            // ✅ BUG FIX: Aiven PostgreSQL replica lag se update overwrite hona band karo
-            // recentlyUpdatedIds mein woh IDs hain jo abhi-abhi update hui hain
-            // Aiven PostgreSQL ka stale replica inhe overwrite kar sakta hai — isliye local version protect karo
-            // pendingInMemory ke IDs bhi protect karo (concurrent update mid-flight)
-            const localPriorityIds = new Set([
-              ...pendingInMemory.map(tx => tx.id),
-              ...pendingUpdateIdsRef.current,
-              ...recentlyUpdatedIds,          // recently updated — local is fresher
-            ]);
-
-            // Aiven PostgreSQL se aaya stale data filter karo jo local mein fresh hai
-            const filteredServerData = syncedFromAiven.filter(tx => !localPriorityIds.has(tx.id));
-            const filteredLocalSynced = localSyncedNotInServer.filter(tx => !localPriorityIds.has(tx.id));
-
-            // Local priority transactions: pending + recently updated
-            const localPriorityTxs = prev.filter(tx => localPriorityIds.has(tx.id));
-
-            mergedList = [...filteredServerData, ...filteredLocalSynced, ...localPriorityTxs];
-            console.log(`🛡️ Protected ${localPriorityIds.size} local-priority transactions from Aiven PostgreSQL stale overwrite.`);
-          } else {
-            // Incremental: add new/updated from server, KEEP existing synced locals
-            const serverIds = new Set(syncedFromAiven.map(tx => tx.id));
-            const existingSynced = prev.filter(tx => tx.isSynced && !serverIds.has(tx.id));
-            mergedList = [...syncedFromAiven, ...existingSynced, ...pendingInMemory];
-          }
-
-          const deduplicatedList = deduplicateTransactions(mergedList);
-          const finalSorted = sortTransactionsByDate(filterDeletedIds(deduplicatedList));
-
-          // Find temporary IDs that were deduplicated (present in prev but removed in finalSorted)
-          const prevTempIds = new Set<string>(prev.filter((tx: Transaction) => !tx.isSynced).map((tx: Transaction) => tx.id));
-          const finalTempIds = new Set<string>(finalSorted.filter((tx: Transaction) => !tx.isSynced).map((tx: Transaction) => tx.id));
-          const removedTempIds: string[] = [...prevTempIds].filter((id: string) => !finalTempIds.has(id));
-
-
-          // Background: persist to IndexedDB without blocking UI
-          (async () => {
-            try {
-              if (shouldForceFull || fetchedAll !== null) {
-                // For full sync, do a clean repopulate
-                await localDB.clearAndRepopulateTransactions(finalSorted);
-              } else {
-                // Incremental: save new server transactions and delete deduplicated temp ones
-                for (const tx of syncedFromAiven) {
-                  // ✅ BUG FIX: Deleted transactions ko IndexedDB mein wapas mat save karo
-                  if (!pendingDeleteIdsRef.current.has(tx.id)) {
-                    await localDB.saveTransaction(tx);
-                  }
-                }
-                for (const tempId of removedTempIds) {
-                  await localDB.deleteTransaction(tempId);
-                }
-              }
-            } catch (e) {
-              console.error('LocalDB sync error in polling:', e);
+        if (syncedFromAiven.length > 0) {
+          setAllTransactions(prev => {
+            const incomingById = new Map(syncedFromAiven.map(tx => [tx.id, tx]));
+            const merged = prev.map(tx => {
+              // An optimistic edit or a queued deletion must never be overwritten
+              // by a delayed routine response.
+              if (localPriorityIds.has(tx.id) || !tx.isSynced) return tx;
+              return incomingById.get(tx.id) || tx;
+            });
+            const presentIds = new Set(merged.map(tx => tx.id));
+            for (const tx of syncedFromAiven) {
+              if (!presentIds.has(tx.id) && !localPriorityIds.has(tx.id)) merged.push(tx);
             }
-          })();
+            return sortTransactionsByDate(filterDeletedIds(deduplicateTransactions(merged)));
+          });
 
-          return finalSorted;
-        });
+          // Persist only the small safe window; a full clear-and-repopulate is now
+          // reserved for the user's explicit full manual synchronization.
+          const safeForCache = syncedFromAiven.filter(tx => !pendingDeleteIdsRef.current.has(tx.id));
+          localDB.saveTransactions(safeForCache).catch(e => console.error('LocalDB recent sync error:', e));
+        }
+
+        if (recentlyUpdatedIds.size > 0) {
+          recentlyUpdatedIdsRef.current.clear();
+        }
+        if (queuedDeleteResult.confirmedIds.length > 0) {
+          console.log(`✅ Reconciliation retained ${queuedDeleteResult.confirmedIds.length} confirmed deletion(s).`);
+        }
 
         setDatabaseConnected(true);
       } catch (error) {
@@ -1053,16 +1015,22 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       }
     });
 
-    // Active-screen recovery: Android WebView/proxy kabhi socket ko “connected”
-    // dikhata hai lekin incoming broadcast miss kar deta hai. App visible ho toh
-    // har 2 seconds Aiven se authoritative reconciliation karao; hidden app ke
-    // liye existing reconnect/online events unnecessary battery usage bachate hain.
-    const refreshInterval = window.setInterval(() => {
-      const appIsVisible = typeof document === 'undefined' || !document.hidden;
-      if (appIsVisible || pendingDeleteIdsRef.current.size > 0 || !realtimeSync.isSocketConnected()) {
-        void refreshAllFromAiven(true);
-      }
-    }, 2000);
+    // Active-screen recovery: use a lighter five-second cadence while Socket.IO is
+    // healthy, and a two-second fallback only while disconnected. Each pass now
+    // requests just the newest 500 rows instead of the entire Aiven table.
+    let fallbackPollTimer: number | undefined;
+    const scheduleFallbackPoll = () => {
+      const socketHealthy = realtimeSync.isSocketConnected();
+      const delay = socketHealthy ? 5000 : 2000;
+      fallbackPollTimer = window.setTimeout(() => {
+        const appIsVisible = typeof document === 'undefined' || !document.hidden;
+        if (appIsVisible || pendingDeleteIdsRef.current.size > 0 || !socketHealthy) {
+          void refreshAllFromAiven(true);
+        }
+        scheduleFallbackPoll();
+      }, delay);
+    };
+    scheduleFallbackPoll();
 
     const handleOnline = () => {
       console.log('📶 Device back online. Triggering sync...');
@@ -1071,7 +1039,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     window.addEventListener('online', handleOnline);
 
     return () => {
-      window.clearInterval(refreshInterval);
+      if (fallbackPollTimer !== undefined) window.clearTimeout(fallbackPollTimer);
       if (realtimeRefreshTimer !== undefined) window.clearTimeout(realtimeRefreshTimer);
       window.removeEventListener('online', handleOnline);
     };

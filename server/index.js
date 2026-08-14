@@ -291,17 +291,59 @@ function publishTransactionEvent(action, payload = {}) {
   return event;
 }
 
-app.get('/api/transactions', async (_req, res) => {
+const transactionSelectFields = `
+  id::text AS id, date, manual_date AS "manualDate", amount::float8 AS amount,
+  type, company, person, notes, payment_method AS "paymentMethod", location,
+  recorded_by AS "recordedBy", bank, slip, breakdown,
+  is_synced AS "isSynced", is_settlement AS "isSettlement", client_id AS "clientId"
+`;
+
+function parseTransactionLimit(value, fallback = -1) {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, 2_000);
+}
+
+// Small, bounded response used by APK startup and routine reconciliation.
+// The newest records have the largest IDs because PostgreSQL assigns IDs on insert.
+app.get('/api/transactions/recent', async (req, res) => {
+  const limit = parseTransactionLimit(req.query.limit, 500);
   await withDatabase(res, async () => {
     const result = await pool.query(`
-      SELECT
-        id::text AS id, date, manual_date AS "manualDate", amount::float8 AS amount,
-        type, company, person, notes, payment_method AS "paymentMethod", location,
-        recorded_by AS "recordedBy", bank, slip, breakdown,
-        is_synced AS "isSynced", is_settlement AS "isSettlement", client_id AS "clientId"
+      SELECT ${transactionSelectFields}
       FROM transactions
       ORDER BY id DESC
-    `);
+      LIMIT $1
+    `, [limit]);
+    res.json(result.rows);
+  });
+});
+
+// Cursor pagination keeps full history available without forcing a multi-megabyte
+// response on the first APK screen. Legacy clients without query parameters retain
+// their previous full-history response until they are updated.
+app.get('/api/transactions', async (req, res) => {
+  const limit = parseTransactionLimit(req.query.limit);
+  const beforeId = Number.parseInt(String(req.query.beforeId || ''), 10);
+  const values = [];
+  const predicates = [];
+
+  if (Number.isInteger(beforeId) && beforeId > 0) {
+    values.push(beforeId);
+    predicates.push(`id < $${values.length}`);
+  }
+
+  let query = `SELECT ${transactionSelectFields} FROM transactions`;
+  if (predicates.length > 0) query += ` WHERE ${predicates.join(' AND ')}`;
+  query += ' ORDER BY id DESC';
+
+  if (limit > 0) {
+    values.push(limit);
+    query += ` LIMIT $${values.length}`;
+  }
+
+  await withDatabase(res, async () => {
+    const result = await pool.query(query, values);
     res.json(result.rows);
   });
 });
