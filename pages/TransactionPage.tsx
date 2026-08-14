@@ -259,7 +259,7 @@ const TransactionPage: React.FC = () => {
 
         {/* Company, Location & Date */}
         <section className="modern-section order-3 grid grid-cols-2 gap-3 p-3 sm:p-4">
-          <div>
+          <div className="order-2">
             <label className="block text-[9px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#6366F1' }}>Company</label>
             <div className="relative">
               <div className="absolute inset-y-0 left-2.5 flex items-center pointer-events-none"><BuildingOfficeIcon className="h-4 w-4" style={{ color: '#A5B4FC' } as any} /></div>
@@ -276,7 +276,7 @@ const TransactionPage: React.FC = () => {
               </select>
             </div>
           </div>
-          <div>
+          <div className="order-4">
             <label className="block text-[9px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#6366F1' }}>Location</label>
             <div className="relative">
               <div className="absolute inset-y-0 left-2.5 flex items-center pointer-events-none"><MapPinIcon className="h-4 w-4" style={{ color: '#A5B4FC' } as any} /></div>
@@ -292,7 +292,7 @@ const TransactionPage: React.FC = () => {
               </select>
             </div>
           </div>
-          <div className="mobile-extra-transaction-field">
+          <div className="mobile-extra-transaction-field order-1">
             <label className="block text-[10px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#4338CA' }}>Customer Name</label>
             <div className="relative">
               <div className="absolute inset-y-0 left-2.5 flex items-center pointer-events-none"><UserIcon className="h-4 w-4" style={{ color: '#A5B4FC' } as any} /></div>
@@ -306,7 +306,7 @@ const TransactionPage: React.FC = () => {
               />
             </div>
           </div>
-          <div className="mobile-extra-transaction-field">
+          <div className="mobile-extra-transaction-field order-3">
             <label className="block text-[9px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#6366F1' }}>Account</label>
             <select
               value={selectedBank}
