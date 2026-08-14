@@ -31,9 +31,9 @@ const HistoryPage: React.FC = () => {
   const [filterYear, setFilterYear] = useState('all');
   const [filterMonth, setFilterMonth] = useState('all');
   const [filterDay, setFilterDay] = useState('all');
-  // History opens in full-history mode so older database records are not hidden
-  // behind a today-only date filter. Users can still switch to today's records.
-  const [showAllDates, setShowAllDates] = useState(true);
+  // History opens with today's cash transactions for a fast, focused mobile view.
+  // The user can manually switch to the complete stored history from Filters.
+  const [showAllDates, setShowAllDates] = useState(false);
 
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isVaultModalOpen, setIsVaultModalOpen] = useState(false);
@@ -327,7 +327,7 @@ const HistoryPage: React.FC = () => {
     setFilterYear('all');
     setFilterMonth('all');
     setFilterDay('all');
-    setShowAllDates(true);
+    setShowAllDates(false);
   }, []);
 
   useEffect(() => {
@@ -528,7 +528,7 @@ const HistoryPage: React.FC = () => {
               className="px-5 py-2.5 rounded-2xl font-black uppercase tracking-widest shadow-md transition-all text-[10px] active:scale-95"
               style={!showAllDates ? {background:'linear-gradient(135deg,#6366F1,#4F46E5)',color:'white'} : {background:'#F5F7FF',border:'1px solid #E0E7FF',color:'#6B7280'}}
             >
-              {showAllDates ? '📅 View Today Only' : '🌍 View Full History'}
+              {showAllDates ? '📅 Show Today Transactions' : '🌍 Show All History'}
             </button>
             {!showAllDates && (
               <span className="text-[10px] font-black uppercase tracking-widest animate-pulse px-3 py-2 rounded-xl" style={{background:'#EEF2FF',border:'1px solid #C7D2FE',color:'#6366F1'}}>
