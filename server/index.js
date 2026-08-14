@@ -304,10 +304,10 @@ async function ensureTransactionSchema() {
     LANGUAGE plpgsql
     AS $$
     DECLARE
-      owner_key TEXT := app_cash_inventory_owner_key(p_recorded_by);
+      v_owner_key TEXT := app_cash_inventory_owner_key(p_recorded_by);
       direction INTEGER;
     BEGIN
-      IF owner_key = '' OR COALESCE(lower(p_payment_method), '') <> 'cash' THEN
+      IF v_owner_key = '' OR COALESCE(lower(p_payment_method), '') <> 'cash' THEN
         RETURN;
       END IF;
 
@@ -322,7 +322,7 @@ async function ensureTransactionSchema() {
 
       INSERT INTO cash_note_inventory_by_user (owner_key, denomination, note_count, updated_at)
       SELECT
-        owner_key,
+        v_owner_key,
         entry.key::INTEGER,
         entry.value::BIGINT * direction * p_multiplier,
         CURRENT_TIMESTAMP
