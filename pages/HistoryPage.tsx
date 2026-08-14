@@ -31,7 +31,9 @@ const HistoryPage: React.FC = () => {
   const [filterYear, setFilterYear] = useState('all');
   const [filterMonth, setFilterMonth] = useState('all');
   const [filterDay, setFilterDay] = useState('all');
-  const [showAllDates, setShowAllDates] = useState(false);
+  // History opens in full-history mode so older database records are not hidden
+  // behind a today-only date filter. Users can still switch to today's records.
+  const [showAllDates, setShowAllDates] = useState(true);
 
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isVaultModalOpen, setIsVaultModalOpen] = useState(false);
@@ -325,7 +327,7 @@ const HistoryPage: React.FC = () => {
     setFilterYear('all');
     setFilterMonth('all');
     setFilterDay('all');
-    setShowAllDates(false);
+    setShowAllDates(true);
   }, []);
 
   useEffect(() => {

@@ -635,7 +635,7 @@ app.get('/api/transactions/recent', async (req, res) => {
     const result = await pool.query(`
       SELECT ${transactionSummaryFields}
       FROM transactions
-      ORDER BY id DESC
+      ORDER BY transactions.id DESC
       LIMIT $1
     `, [limit]);
     res.json(result.rows);
@@ -674,7 +674,10 @@ app.get('/api/transactions', async (req, res) => {
 
   let query = `SELECT ${transactionSummaryFields} FROM transactions`;
   if (predicates.length > 0) query += ` WHERE ${predicates.join(' AND ')}`;
-  query += ' ORDER BY id DESC';
+  // `id` is exposed as text in the response; qualify the table column so
+  // PostgreSQL orders numerically rather than sorting the response alias
+  // lexicographically (for example, "36" before "3500").
+  query += ' ORDER BY transactions.id DESC';
 
   if (limit > 0) {
     values.push(limit);
