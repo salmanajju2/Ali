@@ -115,6 +115,29 @@ export class AivenDatabaseService {
     }
   }
 
+  async getTransactionChanges(afterCursor: string | number = 0, limit = 500): Promise<{
+    changes: Array<{ cursor: string; action: 'add' | 'update' | 'delete'; id: string; transaction: any | null }>;
+    nextCursor: string;
+    hasMore: boolean;
+  }> {
+    const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 1_000);
+    const safeCursor = Math.max(0, Number.parseInt(String(afterCursor), 10) || 0);
+    try {
+      const params = new URLSearchParams({ after: String(safeCursor), limit: String(safeLimit) });
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions/changes?${params.toString()}`);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      return {
+        changes: Array.isArray(data?.changes) ? data.changes : [],
+        nextCursor: String(data?.nextCursor ?? safeCursor),
+        hasMore: Boolean(data?.hasMore),
+      };
+    } catch (error) {
+      console.warn('Failed to fetch durable transaction changes:', error);
+      throw error;
+    }
+  }
+
   async getTransactionPage(limit = 500, beforeId?: string | number): Promise<any[]> {
     try {
       const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 2_000);

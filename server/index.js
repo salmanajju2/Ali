@@ -134,6 +134,44 @@ async function ensureTransactionSchema() {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS transactions_updated_at_idx ON transactions(updated_at DESC)`);
 
+  // Durable cross-device reconciliation log. Socket.IO gives connected clients an
+  // instant update, while this append-only cursor lets a client that was closed
+  // recover every add/update/delete after it reconnects.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transaction_change_log (
+      change_id BIGSERIAL PRIMARY KEY,
+      transaction_id BIGINT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('add', 'update', 'delete')),
+      changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS transaction_change_log_cursor_idx ON transaction_change_log(change_id ASC)`);
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION app_log_transaction_change()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        INSERT INTO transaction_change_log (transaction_id, action) VALUES (NEW.id, 'add');
+        RETURN NEW;
+      ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO transaction_change_log (transaction_id, action) VALUES (NEW.id, 'update');
+        RETURN NEW;
+      ELSE
+        INSERT INTO transaction_change_log (transaction_id, action) VALUES (OLD.id, 'delete');
+        RETURN OLD;
+      END IF;
+    END;
+    $$
+  `);
+  await pool.query(`DROP TRIGGER IF EXISTS log_transactions_change ON transactions`);
+  await pool.query(`
+    CREATE TRIGGER log_transactions_change
+    AFTER INSERT OR UPDATE OR DELETE ON transactions
+    FOR EACH ROW EXECUTE FUNCTION app_log_transaction_change()
+  `);
+
   // Older legacy imports stored breakdown as TEXT. Convert the column once,
   // preserving valid JSON and safely replacing malformed legacy values with {}.
   const breakdownColumn = await pool.query(`
@@ -655,6 +693,63 @@ app.get('/api/transactions/modified-since', async (req, res) => {
       LIMIT $2
     `, [isNaN(since.getTime()) ? new Date(0) : since, limit]);
     res.json(result.rows);
+  });
+});
+
+// Durable cursor reconciliation for clients that were fully closed while another
+// device changed data. Unlike a time-window query, this includes deletes and does
+// not drop older writes after a long offline period.
+app.get('/api/transactions/changes', async (req, res) => {
+  const after = Math.max(0, Number.parseInt(String(req.query.after || '0'), 10) || 0);
+  const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || '500'), 10) || 500, 1), 1_000);
+  await withDatabase(res, async () => {
+    const result = await pool.query(`
+      SELECT
+        c.change_id::text AS cursor,
+        c.action AS "changeAction",
+        c.transaction_id::text AS "transactionId",
+        t.id::text AS id, t.date, t.manual_date AS "manualDate", t.amount::float8 AS amount,
+        t.type, t.company, t.person, t.notes, t.payment_method AS "paymentMethod", t.location,
+        t.recorded_by AS "recordedBy", t.bank,
+        CASE
+          WHEN t.slip IS NULL OR t.slip = '' THEN NULL
+          WHEN t.slip LIKE 'data:%' THEN 'lazy-slip:' || t.id::text
+          ELSE t.slip
+        END AS slip,
+        t.breakdown, t.is_synced AS "isSynced", t.is_settlement AS "isSettlement", t.client_id AS "clientId"
+      FROM transaction_change_log c
+      LEFT JOIN transactions t ON t.id = c.transaction_id
+      WHERE c.change_id > $1
+      ORDER BY c.change_id ASC
+      LIMIT $2
+    `, [after, limit]);
+
+    const changes = result.rows.map(row => ({
+      cursor: row.cursor,
+      action: row.changeAction,
+      id: row.transactionId,
+      transaction: row.id ? {
+        id: row.id,
+        date: row.date,
+        manualDate: row.manualDate,
+        amount: row.amount,
+        type: row.type,
+        company: row.company,
+        person: row.person,
+        notes: row.notes,
+        paymentMethod: row.paymentMethod,
+        location: row.location,
+        recordedBy: row.recordedBy,
+        bank: row.bank,
+        slip: row.slip,
+        breakdown: row.breakdown,
+        isSynced: row.isSynced,
+        isSettlement: row.isSettlement,
+        clientId: row.clientId,
+      } : null,
+    }));
+    const lastCursor = changes.length > 0 ? changes[changes.length - 1].cursor : String(after);
+    res.json({ changes, nextCursor: lastCursor, hasMore: changes.length === limit });
   });
 });
 

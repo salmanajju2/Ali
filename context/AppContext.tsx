@@ -339,6 +339,79 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const pendingUpdateIdsRef = useRef<Set<string>>(new Set<string>());
   // Track recently confirmed edits until one authoritative full refresh completes.
   const recentlyUpdatedIdsRef = useRef<Set<string>>(new Set<string>());
+  // Socket.IO is instant only while a client is alive. This persisted cursor is
+  // the durable recovery point for a web tab or APK that was completely closed.
+  const transactionChangeCursorRef = useRef<number>((() => {
+    try {
+      return Math.max(0, Number.parseInt(localStorage.getItem('ali_transaction_change_cursor') || '0', 10) || 0);
+    } catch {
+      return 0;
+    }
+  })());
+  const durableChangeSyncInProgressRef = useRef(false);
+
+  const reconcileDurableTransactionChanges = useCallback(async (): Promise<number> => {
+    if (!currentUser || durableChangeSyncInProgressRef.current) return 0;
+    durableChangeSyncInProgressRef.current = true;
+    let appliedChanges = 0;
+
+    try {
+      let hasMore = true;
+      while (hasMore) {
+        const page = await aivenDatabase.getTransactionChanges(transactionChangeCursorRef.current, 500);
+        if (page.changes.length === 0) break;
+
+        const deletedIds = new Set(page.changes
+          .filter(change => change.action === 'delete')
+          .map(change => String(change.id)));
+        const incomingById = new Map<string, Transaction>();
+        page.changes.forEach(change => {
+          if ((change.action === 'add' || change.action === 'update') && change.transaction) {
+            incomingById.set(String(change.id), { ...change.transaction, isSynced: true });
+          }
+        });
+        const protectedIds = new Set([
+          ...pendingUpdateIdsRef.current,
+          ...pendingDeleteIdsRef.current,
+        ]);
+
+        setAllTransactions(prev => {
+          const nextById = new Map(prev.map(tx => [String(tx.id), tx]));
+          deletedIds.forEach(id => {
+            // A local, durable delete intent already has the desired UI state.
+            if (!pendingDeleteIdsRef.current.has(id)) nextById.delete(id);
+          });
+          incomingById.forEach((tx, id) => {
+            if (!protectedIds.has(id) && !pendingDeleteIdsRef.current.has(id)) nextById.set(id, tx);
+          });
+          return sortTransactionsByDate(filterDeletedIds(deduplicateTransactions([...nextById.values()])));
+        });
+
+        // Persist the same mutations before advancing the cursor. A device that
+        // closes immediately after reconciliation therefore opens with the right cache.
+        for (const id of deletedIds) {
+          if (!pendingDeleteIdsRef.current.has(id)) await localDB.deleteTransaction(id);
+        }
+        const cacheable = [...incomingById.entries()]
+          .filter(([id]) => !protectedIds.has(id) && !pendingDeleteIdsRef.current.has(id))
+          .map(([, tx]) => tx);
+        if (cacheable.length > 0) await localDB.saveTransactions(cacheable);
+
+        const nextCursor = Math.max(transactionChangeCursorRef.current, Number.parseInt(page.nextCursor, 10) || 0);
+        transactionChangeCursorRef.current = nextCursor;
+        try { localStorage.setItem('ali_transaction_change_cursor', String(nextCursor)); } catch {}
+        appliedChanges += page.changes.length;
+        hasMore = page.hasMore;
+      }
+      return appliedChanges;
+    } catch (error) {
+      console.warn('Durable transaction change reconciliation paused:', error);
+      return appliedChanges;
+    } finally {
+      durableChangeSyncInProgressRef.current = false;
+    }
+  }, [currentUser]);
+
   useEffect(() => {
     allTransactionsRef.current = allTransactions;
   }, [allTransactions]);
@@ -698,6 +771,15 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
           console.log(`✅ App open sync complete. Reconciled ${fetched.length} recent records. Total visible: ${finalSorted.length}`);
 
+          // A client may have been closed while another device added, edited or
+          // deleted data. Replay every missed durable database change before the
+          // background history walk continues.
+          const recoveredChanges = await reconcileDurableTransactionChanges();
+          if (recoveredChanges > 0) {
+            console.log(`✅ App-open durable recovery applied ${recoveredChanges} missed change(s).`);
+            void refreshScopedDatabaseVault();
+          }
+
           // Populate older pages after the first screen is usable. Batches of four
           // pages limit React renders while preserving the complete offline cache.
           const initialUserId = currentUser.uid;
@@ -829,6 +911,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
               console.log(`✅ Auto-uploaded offline transaction: ${oldId} → ${newServerId}`);
             }
           }
+        }
+
+        // First replay the durable server cursor. This covers add/update/delete
+        // operations that occurred while this web tab or APK was closed.
+        const recoveredChanges = await reconcileDurableTransactionChanges();
+        if (recoveredChanges > 0) {
+          console.log(`✅ Durable recovery applied ${recoveredChanges} missed database change(s).`);
         }
 
         // Reconcile recent transactions AND any records modified directly in SQL database
