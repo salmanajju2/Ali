@@ -113,9 +113,13 @@ const VaultPage: React.FC = () => {
     if (view === 'today') {
       const todayVault: NoteCounts = {};
       DENOMINATIONS.forEach(d => todayVault[d] = 0);
-      const todayStr = new Date().toDateString();
+      const now = new Date();
+      const todayY = now.getFullYear();
+      const todayM = now.getMonth();
+      const todayD = now.getDate();
       cashTransactions.forEach(tx => {
-        if (new Date(tx.date).toDateString() === todayStr) {
+        const d = new Date(tx.date);
+        if (!isNaN(d.getTime()) && d.getFullYear() === todayY && d.getMonth() === todayM && d.getDate() === todayD) {
           if (tx.breakdown && typeof tx.breakdown === 'object') {
             for (const denomStr in tx.breakdown) {
               const denom = parseInt(denomStr, 10);
