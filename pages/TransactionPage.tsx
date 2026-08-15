@@ -15,6 +15,11 @@ import { BANK_LOGOS, BANK_NAMES, UPI_BANK_NAMES } from '../constants';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import SimpleCropper from '../components/SimpleCropper';
+import {
+  readRecentTransactionDefaults,
+  writeRecentTransactionDefaults,
+  RecentTransactionDefaults,
+} from '../utils/recentTransactionDefaults';
 
 const TransactionPage: React.FC = () => {
   const { user, addTransaction, companyNames, locations, allBankNames } = useAppContext();
@@ -22,13 +27,22 @@ const TransactionPage: React.FC = () => {
   const navigate = useNavigate();
 
   const currentUserName = user?.displayName || user?.email || 'Unknown User';
+  const [recentDefaults, setRecentDefaults] = useState<RecentTransactionDefaults>(readRecentTransactionDefaults);
 
   const [person, setPerson] = useState('');
-  const [company, setCompany] = useState('');
-  const [location, setLocation] = useState('');
+  const [company, setCompany] = useState(() => recentDefaults.company);
+  const [location, setLocation] = useState(() => recentDefaults.location);
   const [recordedBy, setRecordedBy] = useState(currentUserName);
   const [breakdown, setBreakdown] = useState<NoteCounts>({});
-  const [selectedBank, setSelectedBank] = useState<string>('');
+  const [selectedBank, setSelectedBank] = useState<string>(() => recentDefaults.account);
+
+  const rememberRecentDefault = (field: keyof RecentTransactionDefaults, value: string) => {
+    setRecentDefaults(previous => {
+      const next = { ...previous, [field]: value };
+      writeRecentTransactionDefaults(next);
+      return next;
+    });
+  };
   const [slip, setSlip] = useState<string | null>(null);
   const [imageToCrop, setImageToCrop] = useState<string | null>(null);
   const [manualDate, setManualDate] = useState(new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 19));
@@ -56,6 +70,19 @@ const TransactionPage: React.FC = () => {
   useEffect(() => {
     setRecordedBy(currentUserName);
   }, [currentUserName]);
+
+  // Remove a remembered value if an admin deletes that option from the lists.
+  useEffect(() => {
+    if (!isPersonalUdhar && companyNames.length > 0 && company && !companyNames.includes(company)) {
+      setCompany('');
+    }
+    if (locations.length > 0 && location && !locations.includes(location)) {
+      setLocation('');
+    }
+    if (allBankNames.length > 0 && selectedBank && !allBankNames.includes(selectedBank)) {
+      setSelectedBank('');
+    }
+  }, [allBankNames, company, companyNames, isPersonalUdhar, location, locations, selectedBank]);
 
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
@@ -88,15 +115,16 @@ const TransactionPage: React.FC = () => {
   }, [breakdown]);
 
   const resetForm = (clearPrefilled = false) => {
+    const defaults = readRecentTransactionDefaults();
     if (!isPersonalUdhar || clearPrefilled) {
       setPerson('');
-      setCompany('');
+      setCompany(defaults.company);
       setIsPersonalUdhar(false);
       setPrefilledType(null);
       navigate('.', { replace: true });
     }
-    setLocation('');
-    setSelectedBank('');
+    setLocation(defaults.location);
+    setSelectedBank(defaults.account);
     setSlip(null);
     setBreakdown({});
     setError(null);
@@ -264,7 +292,7 @@ const TransactionPage: React.FC = () => {
             <div className="relative">
               <div className="absolute inset-y-0 left-2.5 flex items-center pointer-events-none"><BuildingOfficeIcon className="h-4 w-4" style={{ color: '#A5B4FC' } as any} /></div>
               <select
-                value={company} onChange={e => setCompany(e.target.value)} disabled={isPersonalUdhar}
+                value={company} onChange={e => { const value = e.target.value; setCompany(value); rememberRecentDefault('company', value); }} disabled={isPersonalUdhar}
                 className="block w-full appearance-none pl-8 pr-2 py-2.5 rounded-xl text-xs outline-none font-black uppercase transition-all disabled:opacity-60"
                 style={{ background: '#F5F7FF', border: '1.5px solid #E0E7FF', color: '#1E1B4B' }}
                 onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}
@@ -281,7 +309,7 @@ const TransactionPage: React.FC = () => {
             <div className="relative">
               <div className="absolute inset-y-0 left-2.5 flex items-center pointer-events-none"><MapPinIcon className="h-4 w-4" style={{ color: '#A5B4FC' } as any} /></div>
               <select
-                value={location} onChange={e => setLocation(e.target.value)} required
+                value={location} onChange={e => { const value = e.target.value; setLocation(value); rememberRecentDefault('location', value); }} required
                 className="block w-full pl-8 pr-2 py-2.5 rounded-xl text-xs outline-none font-black uppercase transition-all"
                 style={{ background: '#F5F7FF', border: '1.5px solid #E0E7FF', color: '#1E1B4B' }}
                 onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}
@@ -310,7 +338,7 @@ const TransactionPage: React.FC = () => {
             <label className="block text-[9px] font-black uppercase tracking-widest mb-1 ml-1" style={{ color: '#6366F1' }}>Account</label>
             <select
               value={selectedBank}
-              onChange={(e) => setSelectedBank(e.target.value)}
+              onChange={(e) => { const value = e.target.value; setSelectedBank(value); rememberRecentDefault('account', value); }}
               className="block w-full px-3 py-2.5 rounded-xl font-black uppercase outline-none transition-all text-xs"
               style={{ background: '#F5F7FF', border: '1.5px solid #E0E7FF', color: '#1E1B4B' }}
               onFocus={e => { e.target.style.borderColor = '#818CF8'; e.target.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.12)'; }}

@@ -311,7 +311,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     return saved ? JSON.parse(saved) : LOCATIONS;
   });
   const [databaseConnected, setDatabaseConnected] = useState(false);
-  const [socketConnected, setSocketConnected] = useState(false);
+  // RealtimeSyncService may connect before React registers its status callback.
+  // Read the current singleton state on first render to avoid a stale Offline label.
+  const [socketConnected, setSocketConnected] = useState(() => realtimeSync.isSocketConnected());
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
 
   // Sync feedback is temporary. A past, transient network failure must not keep
@@ -329,9 +331,6 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   // Remember that event so the latest database state is fetched immediately after
   // the in-flight request completes instead of silently dropping the refresh.
   const queuedRealtimeRefreshRef = useRef(false);
-  // Only one background history walk may run at a time. It is intentionally
-  // separate from routine reconciliation so a 10k-row import cannot block UI.
-  const historyHydrationInProgressRef = useRef(false);
   const lastFetchTimeRef = useRef<number>(0);
   const allTransactionsRef = useRef<Transaction[]>([]);
   // Track in-flight edits separately from new offline transactions. A real ID with
@@ -376,7 +375,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         ]);
 
         setAllTransactions(prev => {
-          const nextById = new Map(prev.map(tx => [String(tx.id), tx]));
+          const nextById = new Map<string, Transaction>(prev.map(tx => [String(tx.id), tx] as const));
           deletedIds.forEach(id => {
             // A local, durable delete intent already has the desired UI state.
             if (!pendingDeleteIdsRef.current.has(id)) nextById.delete(id);
@@ -780,57 +779,6 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             void refreshScopedDatabaseVault();
           }
 
-          // Populate older pages after the first screen is usable. Batches of four
-          // pages limit React renders while preserving the complete offline cache.
-          const initialUserId = currentUser.uid;
-          if (!historyHydrationInProgressRef.current && fetched.length >= 1_000) {
-            historyHydrationInProgressRef.current = true;
-            void (async () => {
-              let beforeId = fetched[fetched.length - 1]?.id;
-              let pagesLoaded = 0;
-              let bufferedTransactions: Transaction[] = [];
-              const flushBuffer = () => {
-                if (bufferedTransactions.length === 0) return;
-                const batch = bufferedTransactions;
-                bufferedTransactions = [];
-                setAllTransactions(prev => {
-                  const merged = deduplicateTransactions([...prev, ...batch]);
-                  return sortTransactionsByDate(filterDeletedIds(merged));
-                });
-              };
-
-              try {
-                while (beforeId && currentUserUidRef.current === initialUserId) {
-                  const page = await aivenDatabase.getTransactionPage(500, beforeId);
-                  if (page.length === 0) break;
-
-                  const syncedPage = page.map(tx => ({ ...tx, isSynced: true }));
-                  await localDB.saveTransactions(syncedPage);
-                  bufferedTransactions.push(...syncedPage);
-                  pagesLoaded += 1;
-
-                  const nextBeforeId = page[page.length - 1]?.id;
-                  if (!nextBeforeId || nextBeforeId === beforeId) break;
-                  beforeId = nextBeforeId;
-
-                  if (pagesLoaded % 4 === 0 || page.length < 500) flushBuffer();
-                  // Yield to input/rendering so a long first cache hydrate never
-                  // makes the APK feel frozen.
-                  await new Promise(resolve => window.setTimeout(resolve, 0));
-                  if (page.length < 500) break;
-                }
-                flushBuffer();
-                console.log(`✅ Background history hydration completed: ${pagesLoaded} page(s).`);
-              } catch (historyError) {
-                // Recent data and the existing cache remain usable; the next open
-                // or manual sync continues reconciliation without data loss.
-                console.warn('Background history hydration paused:', historyError);
-                flushBuffer();
-              } finally {
-                historyHydrationInProgressRef.current = false;
-              }
-            })();
-          }
         } else {
           console.log('ℹ️ No recent records returned from Aiven PostgreSQL. Using local data.');
           if (localTransactions.length > 0) {

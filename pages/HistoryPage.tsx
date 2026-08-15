@@ -34,6 +34,7 @@ const HistoryPage: React.FC = () => {
   // History opens with today's cash transactions for a fast, focused mobile view.
   // The user can manually switch to the complete stored history from Filters.
   const [showAllDates, setShowAllDates] = useState(false);
+  const [isLoadingAllHistory, setIsLoadingAllHistory] = useState(false);
 
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isVaultModalOpen, setIsVaultModalOpen] = useState(false);
@@ -318,6 +319,30 @@ const HistoryPage: React.FC = () => {
     setVisibleCount(TRANSACTIONS_PER_PAGE);
   }, [searchTerm, filterCompany, filterLocation, filterType, filterRecorder, showAllDates, filterYear, filterMonth, filterDay]);
 
+  const handleHistoryModeToggle = useCallback(async () => {
+    const nextState = !showAllDates;
+    setShowAllDates(nextState);
+
+    if (!nextState) {
+      setFilterYear('all');
+      setFilterMonth('all');
+      setFilterDay('all');
+      return;
+    }
+
+    // Recent records are loaded automatically; fetch the complete history only
+    // when the user explicitly asks for Show All, keeping APK startup lightweight.
+    setIsLoadingAllHistory(true);
+    try {
+      await manualSync(true);
+      setFilterYear('all');
+      setFilterMonth('all');
+      setFilterDay('all');
+    } finally {
+      setIsLoadingAllHistory(false);
+    }
+  }, [manualSync, showAllDates]);
+
   const resetFilters = useCallback(() => {
     setSearchTerm('');
     setFilterCompany('all');
@@ -514,21 +539,13 @@ const HistoryPage: React.FC = () => {
             <select value={filterRecorder} onChange={e => setFilterRecorder(e.target.value)} className="w-full p-2 rounded-xl text-sm outline-none" style={{background:'#F5F7FF',border:'1.5px solid #E0E7FF',color:'#1E1B4B'}}><option value="all">All Recorders</option>{recorderNames.map(name => <option key={name} value={name}>{name.replace('@gmail.com', '')}</option>)}</select>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <button 
-              onClick={() => {
-                const newState = !showAllDates;
-                setShowAllDates(newState);
-                if (newState) {
-                  // Reset sub-filters when switching to "All Dates" to show everything
-                  setFilterYear('all');
-                  setFilterMonth('all');
-                  setFilterDay('all');
-                }
-              }} 
-              className="px-5 py-2.5 rounded-2xl font-black uppercase tracking-widest shadow-md transition-all text-[10px] active:scale-95"
+            <button
+              onClick={() => void handleHistoryModeToggle()}
+              disabled={isLoadingAllHistory}
+              className="px-5 py-2.5 rounded-2xl font-black uppercase tracking-widest shadow-md transition-all text-[10px] active:scale-95 disabled:opacity-60"
               style={!showAllDates ? {background:'linear-gradient(135deg,#6366F1,#4F46E5)',color:'white'} : {background:'#F5F7FF',border:'1px solid #E0E7FF',color:'#6B7280'}}
             >
-              {showAllDates ? '📅 Show Today Transactions' : '🌍 Show All History'}
+              {isLoadingAllHistory ? '⏳ Loading History...' : showAllDates ? '📅 Show Today Transactions' : '🌍 Show All History'}
             </button>
             {!showAllDates && (
               <span className="text-[10px] font-black uppercase tracking-widest animate-pulse px-3 py-2 rounded-xl" style={{background:'#EEF2FF',border:'1px solid #C7D2FE',color:'#6366F1'}}>

@@ -9,6 +9,11 @@ import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import SlipImage from '../components/SlipImage';
 import SimpleCropper from '../components/SimpleCropper';
+import {
+  readRecentTransactionDefaults,
+  writeRecentTransactionDefaults,
+  RecentTransactionDefaults,
+} from '../utils/recentTransactionDefaults';
 
 const UpiCreditPage: React.FC = () => {
   const { user, addTransaction, allBankNames } = useAppContext();
@@ -18,11 +23,20 @@ const UpiCreditPage: React.FC = () => {
   const { companyName, companyLocation, person: initialPerson, from: returnUrl } = location.state || {};
 
   const currentUserName = user?.displayName || user?.email || 'Unknown User';
+  const [recentDefaults, setRecentDefaults] = useState<RecentTransactionDefaults>(readRecentTransactionDefaults);
 
   const [person, setPerson] = useState(initialPerson || '');
   const [selectedCompany, setSelectedCompany] = useState(companyName || '');
   const [amount, setAmount] = useState<number | ''>('');
-  const [selectedBank, setSelectedBank] = useState<string>('');
+  const [selectedBank, setSelectedBank] = useState<string>(() => recentDefaults.account);
+
+  const rememberRecentDefault = (field: keyof RecentTransactionDefaults, value: string) => {
+    setRecentDefaults(previous => {
+      const next = { ...previous, [field]: value };
+      writeRecentTransactionDefaults(next);
+      return next;
+    });
+  };
   const [hasSlip, setHasSlip] = useState(false);
   const [slip, setSlip] = useState<string | null>(null);
   const [imageToCrop, setImageToCrop] = useState<string | null>(null);
@@ -41,6 +55,7 @@ const UpiCreditPage: React.FC = () => {
       navigate('/summary');
     }
   }, [companyName, companyLocation, navigate]);
+
 
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
@@ -279,7 +294,11 @@ const UpiCreditPage: React.FC = () => {
             <select
               id="bank"
               value={selectedBank}
-              onChange={(e) => setSelectedBank(e.target.value)}
+              onChange={(e) => {
+                const value = e.target.value;
+                setSelectedBank(value);
+                rememberRecentDefault('account', value);
+              }}
               className="mt-1 block w-full py-3 px-4 rounded-xl shadow-inner focus:outline-none focus:ring-2 font-black uppercase tracking-tight"
               style={{ background: '#F5F7FF', border: '2px solid #E0E7FF', color: '#1E1B4B' }}
             >

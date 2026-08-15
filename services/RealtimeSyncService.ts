@@ -35,6 +35,11 @@ class RealtimeSyncService {
 
   public setStatusCallback(callback: (connected: boolean) => void) {
     this.onStatusChange = callback;
+
+    // AppContext ka callback socket ke `connect` event ke baad register ho sakta hai.
+    // Current state immediately replay karne se already-connected socket stale
+    // `Offline` indicator nahi dikhata.
+    callback(this.isSocketConnected());
   }
 
   private async init() {
