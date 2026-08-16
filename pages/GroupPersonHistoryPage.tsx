@@ -14,7 +14,7 @@ import { PlusIcon } from '../components/icons/PlusIcon';
 import { TrashIcon } from '../components/icons/TrashIcon';
 
 import SlipImage from '../components/SlipImage';
-import { aivenDatabase } from '../services/AivenDatabaseService';
+import { d1Database } from '../services/d1Database';
 import { BANK_LOGOS } from '../constants';
 
 const TRANSACTIONS_PER_PAGE = 50;
@@ -178,7 +178,7 @@ const GroupPersonHistoryPage: React.FC = () => {
       return;
     }
     try {
-      const transaction = await aivenDatabase.getTransaction(source.slice('lazy-slip:'.length));
+      const transaction = await d1Database.getTransaction(source.slice('lazy-slip:'.length));
       setSelectedSlip(transaction?.slip || null);
     } catch (error) {
       console.error('Unable to load the selected receipt:', error);

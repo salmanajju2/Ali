@@ -1,22 +1,22 @@
+import { d1Database } from './d1Database';
 import { localDB } from './LocalDBService';
-import { aivenDatabase } from './AivenDatabaseService';
 import { Transaction } from '../types';
 
 /**
  * Optional local-cache reconciliation helper. Transaction persistence always
- * uses the Aiven PostgreSQL API through AivenDatabaseService.
+ * uses Cloudflare D1 through D1DatabaseService.
  */
-class AivenSyncService {
+class D1SyncService {
   private isSyncing = false;
 
-  public async syncWithAivenPostgreSQL(): Promise<void> {
+  public async syncWithD1(): Promise<void> {
     if (this.isSyncing) return;
     this.isSyncing = true;
 
     try {
       const [localTransactions, serverTransactions] = await Promise.all([
         localDB.getTransactions(),
-        aivenDatabase.getAllTransactions(),
+        d1Database.getAllTransactions(),
       ]);
 
       const serverTransactionIds = new Set(serverTransactions.map(transaction => transaction.id));
@@ -26,7 +26,7 @@ class AivenSyncService {
 
       for (const transaction of unsyncedLocal) {
         if (String(transaction.id).startsWith('temp_')) {
-          await aivenDatabase.addTransaction(transaction);
+          await d1Database.addTransaction(transaction);
         }
       }
 
@@ -41,7 +41,7 @@ class AivenSyncService {
         [...newServerTransactions, ...updatedServerTransactions].map(transaction => localDB.saveTransaction(transaction)),
       );
     } catch (error) {
-      console.error('Aiven PostgreSQL synchronization failed:', error);
+      console.error('Cloudflare D1 synchronization failed:', error);
     } finally {
       this.isSyncing = false;
     }
@@ -59,4 +59,4 @@ class AivenSyncService {
   }
 }
 
-export const aivenSyncService = new AivenSyncService();
+export const d1SyncService = new D1SyncService();

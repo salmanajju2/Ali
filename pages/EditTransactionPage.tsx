@@ -14,7 +14,7 @@ import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import SlipImage from '../components/SlipImage';
 import SimpleCropper from '../components/SimpleCropper';
-import { aivenDatabase } from '../services/AivenDatabaseService';
+import { d1Database } from '../services/d1Database';
 
 const EditTransactionPage: React.FC = () => {
     const { transactionId } = useParams<{ transactionId: string }>();
@@ -80,7 +80,7 @@ const EditTransactionPage: React.FC = () => {
                 let transactionWithSlip = txToEdit;
                 if (txToEdit.slip?.startsWith('lazy-slip:')) {
                     try {
-                        const detail = await aivenDatabase.getTransaction(txToEdit.id);
+                        const detail = await d1Database.getTransaction(txToEdit.id);
                         if (detail) transactionWithSlip = detail as Transaction;
                     } catch (loadError) {
                         console.error('Unable to load transaction receipt for editing:', loadError);

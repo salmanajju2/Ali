@@ -15,7 +15,7 @@ import { PrinterIcon } from '../components/icons/PrinterIcon';
 import TotalVaultDetails from '../components/TotalVaultDetails';
 import { sendTelegramPhoto } from '../services/telegramService';
 import SlipImage from '../components/SlipImage';
-import { aivenDatabase } from '../services/AivenDatabaseService';
+import { d1Database } from '../services/d1Database';
 
 const TRANSACTIONS_PER_PAGE = 50;
 
@@ -69,7 +69,7 @@ const HistoryPage: React.FC = () => {
     }
 
     try {
-      const transaction = await aivenDatabase.getTransaction(source.slice('lazy-slip:'.length));
+      const transaction = await d1Database.getTransaction(source.slice('lazy-slip:'.length));
       setSelectedSlip(transaction?.slip || null);
     } catch (error) {
       console.error('Unable to load the selected receipt:', error);

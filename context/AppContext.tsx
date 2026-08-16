@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode, useMemo, useRef } from 'react';
 import { Transaction, NoteCounts } from '../types';
 import { COMPANY_NAMES as defaultCompanyNames, LOCATIONS, DENOMINATIONS, BANK_NAMES, BANK_LOGOS } from '../constants';
-import { aivenDatabase } from '../services/AivenDatabaseService';
+import { d1Database } from '../services/d1Database';
 import { useAuth, User } from './AuthContext';
 import { localDB } from '../services/LocalDBService';
 import { sendTelegramMessage, sendTelegramPhoto, deleteTelegramMessage } from '../services/telegramService';
@@ -284,7 +284,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       console.log(`📤 Replaying ${realIds.length} queued deletion(s) to Aiven PostgreSQL...`);
       // Prefer one atomic request so a bulk delete cannot leave a client-visible
       // partial state while individual DELETE requests are still in flight.
-      const bulkConfirmedIds = await aivenDatabase.deleteTransactions(realIds);
+      const bulkConfirmedIds = await d1Database.deleteTransactions(realIds);
       if (bulkConfirmedIds !== null) {
         confirmedIds.push(...realIds.filter(id => bulkConfirmedIds.includes(id)));
         console.log(`✅ Bulk Aiven PostgreSQL delete confirmed: ${confirmedIds.length}/${realIds.length}`);
@@ -292,7 +292,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // Older deployments may not have the bulk route yet. Keep the safe,
         // idempotent per-row fallback until Render finishes deploying the route.
         for (const id of realIds) {
-          const deleted = await aivenDatabase.deleteTransaction(id);
+          const deleted = await d1Database.deleteTransaction(id);
           if (deleted) {
             confirmedIds.push(id);
             console.log(`✅ Queued Aiven PostgreSQL delete confirmed: ${id}`);
@@ -365,7 +365,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     try {
       let hasMore = true;
       while (hasMore) {
-        const page = await aivenDatabase.getTransactionChanges(transactionChangeCursorRef.current, 500);
+        const page = await d1Database.getTransactionChanges(transactionChangeCursorRef.current, 500);
         if (page.changes.length === 0) break;
 
         const deletedIds = new Set(page.changes
@@ -522,8 +522,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       return Promise.resolve();
     }
     const inventoryRequest = isAdminUser(currentUser)
-      ? aivenDatabase.getCashNoteInventory()
-      : aivenDatabase.getUserCashNoteInventory(getUserIdentityKeys(currentUser));
+      ? d1Database.getCashNoteInventory()
+      : d1Database.getUserCashNoteInventory(getUserIdentityKeys(currentUser));
     return inventoryRequest
       .then(inventory => setDatabaseVault({ ...initializeVault(), ...inventory.counts }))
       .catch(error => console.warn('Cash note inventory refresh failed:', error));
@@ -565,7 +565,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       for (const localTx of unsyncedLocal) {
         console.log(`📤 Uploading offline transaction ${localTx.id} to Aiven PostgreSQL.`);
         if (!localTx.id.toString().startsWith('temp_') && !localTx.id.toString().startsWith('recovered_')) {
-          const updated = await aivenDatabase.updateTransaction(localTx);
+          const updated = await d1Database.updateTransaction(localTx);
           if (updated) {
             localTx.isSynced = true;
             pendingUpdateIdsRef.current.delete(localTx.id);
@@ -577,7 +577,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
         }
 
-        const newServerId = await aivenDatabase.addTransaction(localTx);
+        const newServerId = await d1Database.addTransaction(localTx);
         if (newServerId) {
           const oldId = localTx.id;
           idRecordMap[oldId] = newServerId;
@@ -611,10 +611,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       
       if (localTransactions.length > 0 && maxId > 0 && !forceFull) {
         console.log('🔄 Performing Incremental Sync...');
-        fetchedTransactions = await aivenDatabase.getNewTransactions(maxId);
+        fetchedTransactions = await d1Database.getNewTransactions(maxId);
       } else {
         console.log('🔄 Performing Full Sync...');
-        fetchedTransactions = await aivenDatabase.getAllTransactions(-1);
+        fetchedTransactions = await d1Database.getAllTransactions(-1);
         isFullSync = true;
       }
       console.log(`📥 Manual Sync: Received ${fetchedTransactions.length} records for reconciliation.`);
@@ -752,9 +752,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // Step 2: The first network response is deliberately bounded. Existing
         // IndexedDB data is shown above immediately; a new APK receives only the
         // newest slice instead of waiting for all 10,616 rows to deserialize.
-        aivenDatabase.initializeDatabase().catch(e => console.warn('DB init error (background):', e));
+        d1Database.initializeDatabase().catch(e => console.warn('DB init error (background):', e));
         console.log('📥 Initial Sync: fetching the newest 1,000 Aiven PostgreSQL records.');
-        const fetched: Transaction[] = await aivenDatabase.getRecentTransactions(1_000);
+        const fetched: Transaction[] = await d1Database.getRecentTransactions(1_000);
         // Seven rows only: this never delays the first transaction screen.
         void refreshScopedDatabaseVault();
 
@@ -841,7 +841,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             const isExistingServerTransaction = !tx.id.startsWith('temp_') && !tx.id.startsWith('recovered_');
 
             if (isExistingServerTransaction) {
-              const updated = await aivenDatabase.updateTransaction({ ...tx, isSynced: true });
+              const updated = await d1Database.updateTransaction({ ...tx, isSynced: true });
               if (updated) {
                 const syncedTx = { ...tx, isSynced: true };
                 await localDB.saveTransaction(syncedTx);
@@ -855,7 +855,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             }
 
             const oldId = tx.id;
-            const newServerId = await aivenDatabase.addTransaction(tx);
+            const newServerId = await d1Database.addTransaction(tx);
             if (newServerId) {
               const syncedTx = { ...tx, id: newServerId, isSynced: true };
               await localDB.deleteTransaction(oldId);
@@ -882,8 +882,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         const fetchStartTime = new Date().toISOString();
 
         const [fetchedRecent, fetchedModified] = await Promise.all([
-          aivenDatabase.getRecentTransactions(500),
-          aivenDatabase.getTransactionsModifiedSince(lastSyncTs),
+          d1Database.getRecentTransactions(500),
+          d1Database.getTransactionsModifiedSince(lastSyncTs),
         ]);
 
         localStorage.setItem(lastSyncKey, fetchStartTime);
@@ -1222,7 +1222,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             }
           }
 
-          const serverId = await aivenDatabase.addTransaction(transactionForServer);
+          const serverId = await d1Database.addTransaction(transactionForServer);
           if (!serverId) {
             // The unsynced local transaction remains durable and will be retried by sync.
             setDatabaseConnected(false);
@@ -1299,8 +1299,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         setSyncStatus('syncing');
         // The connection flag is diagnostic only. Always attempt both PostgreSQL writes.
         const [serverIdDebit, serverIdCredit] = await Promise.all([
-          aivenDatabase.addTransaction(newDebitTransaction),
-          aivenDatabase.addTransaction(newCreditTransaction),
+          d1Database.addTransaction(newDebitTransaction),
+          d1Database.addTransaction(newCreditTransaction),
         ]);
 
           if (serverIdDebit && serverIdCredit) {
@@ -1416,7 +1416,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         let allWritesSucceeded = true;
         for (const tx of newTransactions) {
           await localDB.saveTransaction(tx);
-          const serverId = await aivenDatabase.addTransaction(tx);
+          const serverId = await d1Database.addTransaction(tx);
           if (serverId) {
             const synced = { ...tx, id: serverId, isSynced: true };
             await localDB.deleteTransaction(tx.id);
@@ -1515,7 +1515,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           if (!txToProcess.clientId) {
             txToProcess = { ...txToProcess, clientId: txToProcess.id };
           }
-          const serverId = await aivenDatabase.addTransaction(txToProcess);
+          const serverId = await d1Database.addTransaction(txToProcess);
           if (serverId) {
             txToBroadcast = { ...txToProcess, id: serverId, isSynced: true };
             await localDB.deleteTransaction(txToProcess.id);
@@ -1524,7 +1524,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         } else {
           // The server receives the final synchronized record, while the UI/cache stays
           // unsynced until this request has acknowledged successfully.
-          success = await aivenDatabase.updateTransaction({ ...txToProcess, isSynced: true });
+          success = await d1Database.updateTransaction({ ...txToProcess, isSynced: true });
           if (success) {
             txToBroadcast = { ...txToProcess, isSynced: true };
           }
