@@ -33,7 +33,22 @@ const TransactionPage: React.FC = () => {
   const [company, setCompany] = useState(() => recentDefaults.company);
   const [location, setLocation] = useState(() => recentDefaults.location);
   const [recordedBy, setRecordedBy] = useState(currentUserName);
-  const [breakdown, setBreakdown] = useState<NoteCounts>({});
+  const [breakdown, setBreakdown] = useState<NoteCounts>(() => {
+    try {
+      const saved = sessionStorage.getItem('ali_draft_breakdown');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('ali_draft_breakdown', JSON.stringify(breakdown));
+    } catch (e) {
+      console.warn('Failed to save draft breakdown', e);
+    }
+  }, [breakdown]);
   const [selectedBank, setSelectedBank] = useState<string>(() => recentDefaults.account);
 
   const rememberRecentDefault = (field: keyof RecentTransactionDefaults, value: string) => {
@@ -127,6 +142,9 @@ const TransactionPage: React.FC = () => {
     setSelectedBank(defaults.account);
     setSlip(null);
     setBreakdown({});
+    try {
+      sessionStorage.removeItem('ali_draft_breakdown');
+    } catch {}
     setError(null);
     setManualDate(new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 19));
   };
@@ -218,6 +236,9 @@ const TransactionPage: React.FC = () => {
       };
 
       await addTransaction(transactionData);
+      try {
+        sessionStorage.removeItem('ali_draft_breakdown');
+      } catch {}
 
       const formattedDate = new Date(manualDate).toLocaleString('en-IN', {
         timeZone: 'Asia/Kolkata',
