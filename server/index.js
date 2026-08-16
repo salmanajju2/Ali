@@ -872,6 +872,38 @@ app.put('/api/transactions/:id', async (req, res) => {
   });
 });
 
+app.post('/api/transactions/bulk-delete', async (req, res) => {
+  const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const ids = [...new Set(rawIds.map(value => Number(value)).filter(id => Number.isInteger(id) && id > 0))];
+  if (ids.length === 0 || ids.length !== rawIds.length) {
+    return res.status(400).json({ error: 'A non-empty array of valid transaction IDs is required.' });
+  }
+
+  await withDatabase(res, async () => {
+    // One SQL DELETE is atomic. PostgreSQL triggers update both cash-note
+    // inventory tables and the durable transaction change log for every row.
+    const result = await pool.query(
+      'DELETE FROM transactions WHERE id = ANY($1::integer[]) RETURNING id::text AS id',
+      [ids]
+    );
+    const deletedIds = result.rows.map(row => String(row.id));
+    const noteInventory = await getCashNoteInventorySnapshot();
+    if (deletedIds.length > 0) {
+      publishTransactionEvent('delete', { ids: deletedIds, noteInventory });
+    }
+
+    // Treat already-absent rows as confirmed too. This makes offline retries
+    // idempotent when the original response was lost after PostgreSQL committed.
+    res.json({
+      ok: true,
+      requestedIds: ids.map(String),
+      deletedIds,
+      confirmedIds: ids.map(String),
+      noteInventory,
+    });
+  });
+});
+
 app.delete('/api/transactions/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) {
@@ -1083,8 +1115,8 @@ io.on('connection', (socket) => {
   console.log('⚡ Socket.IO client connected:', socket.id);
 
   // Transaction writes must always go through the REST API. This compatibility
-  // handler deliberately refuses client-originated add/update/delete broadcasts:
-  // otherwise another device could receive optimistic data before Aiven confirms it.
+  // handler never trusts client payloads; it only relays an authoritative refresh
+  // request after the client has received REST confirmation.
   socket.on('transaction-updated', (data, ack) => {
     if (data?.action === 'sync-status-check' && typeof data?.testId === 'string') {
       const diagnosticEvent = {
@@ -1098,7 +1130,23 @@ io.on('connection', (socket) => {
       return;
     }
 
-    console.warn(`Ignored client-originated transaction event from ${socket.id}; use the REST API.`);
+    // REST remains the only authoritative write path. After a successful REST
+    // mutation, the client sends this notification as a safety net in case the
+    // REST route's normal broadcast was missed by a reconnecting WebView. Do not
+    // trust or rebroadcast the client payload; ask other clients to fetch the
+    // committed PostgreSQL state instead.
+    if (['add', 'update', 'delete'].includes(data?.action)) {
+      socket.broadcast.emit('trigger-sync', {
+        action: 'sync',
+        reason: 'client-mutation-notify',
+        requestedAction: data.action,
+        emittedAt: new Date().toISOString(),
+      });
+      if (typeof ack === 'function') ack({ ok: true, accepted: true, refreshOnly: true });
+      return;
+    }
+
+    console.warn(`Ignored unknown client-originated event from ${socket.id}; use the REST API.`);
     if (typeof ack === 'function') {
       ack({
         ok: true,

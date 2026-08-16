@@ -252,6 +252,27 @@ export class AivenDatabaseService {
     }
   }
 
+  async deleteTransactions(ids: Array<string | number>): Promise<string[] | null> {
+    const normalizedIds = [...new Set(ids.map(String))];
+    if (normalizedIds.length === 0) return [];
+    try {
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions/bulk-delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: normalizedIds })
+      });
+      // null tells the caller that an older backend has no bulk route yet; it can
+      // safely fall back to the existing per-row idempotent DELETE endpoint.
+      if (response.status === 404) return null;
+      if (!response.ok) return [];
+      const data = await response.json();
+      return Array.isArray(data?.confirmedIds) ? data.confirmedIds.map(String) : [];
+    } catch (error) {
+      console.error('Error bulk-deleting transactions from PostgreSQL:', error);
+      return [];
+    }
+  }
+
   async deleteTransaction(id: string | number): Promise<boolean> {
     try {
       const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions/${id}`, {

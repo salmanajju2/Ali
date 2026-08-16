@@ -279,23 +279,31 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     }
 
     pendingDeleteFlushInProgressRef.current = true;
-    const confirmedIds: string[] = [];
+        const confirmedIds: string[] = [];
     try {
       console.log(`📤 Replaying ${realIds.length} queued deletion(s) to Aiven PostgreSQL...`);
-      for (const id of realIds) {
-        const deleted = await aivenDatabase.deleteTransaction(id);
-        if (deleted) {
-          confirmedIds.push(id);
-          console.log(`✅ Queued Aiven PostgreSQL delete confirmed: ${id}`);
-        } else {
-          console.warn(`⚠️ Queued Aiven PostgreSQL delete still pending: ${id}`);
+      // Prefer one atomic request so a bulk delete cannot leave a client-visible
+      // partial state while individual DELETE requests are still in flight.
+      const bulkConfirmedIds = await aivenDatabase.deleteTransactions(realIds);
+      if (bulkConfirmedIds !== null) {
+        confirmedIds.push(...realIds.filter(id => bulkConfirmedIds.includes(id)));
+        console.log(`✅ Bulk Aiven PostgreSQL delete confirmed: ${confirmedIds.length}/${realIds.length}`);
+      } else {
+        // Older deployments may not have the bulk route yet. Keep the safe,
+        // idempotent per-row fallback until Render finishes deploying the route.
+        for (const id of realIds) {
+          const deleted = await aivenDatabase.deleteTransaction(id);
+          if (deleted) {
+            confirmedIds.push(id);
+            console.log(`✅ Queued Aiven PostgreSQL delete confirmed: ${id}`);
+          } else {
+            console.warn(`⚠️ Queued Aiven PostgreSQL delete still pending: ${id}`);
+          }
         }
       }
-
       if (confirmedIds.length > 0) {
         removePendingDeletes(confirmedIds);
       }
-
       const pendingIds = realIds.filter(id => !confirmedIds.includes(id));
       return { confirmedIds: [...localOnlyIds, ...confirmedIds], pendingIds };
     } finally {
