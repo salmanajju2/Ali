@@ -1,6 +1,8 @@
 import { io, Socket } from 'socket.io-client';
 import { API_ORIGIN } from './apiConfig';
 
+const REALTIME_ENABLED = String(import.meta.env.VITE_ENABLE_REALTIME || '').toLowerCase() === 'true';
+
 class RealtimeSyncService {
   private socket: Socket | null = null;
   private isInitialized = false;
@@ -44,6 +46,13 @@ class RealtimeSyncService {
 
   private async init() {
     if (this.isInitialized) return;
+    if (!REALTIME_ENABLED || !API_ORIGIN) {
+      // Cloudflare D1 durable change polling is authoritative. Do not connect
+      // to the removed Render/Aiven Socket.IO backend by default.
+      this.isInitialized = true;
+      this.onStatusChange?.(false);
+      return;
+    }
 
     const socketUrl = this.getSocketUrl();
     console.log(`Connecting to Socket Server at ${socketUrl}...`);

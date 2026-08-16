@@ -210,7 +210,7 @@ const deduplicateTransactions = (list: Transaction[]): Transaction[] => {
 export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const { currentUser } = useAuth();
   const [allTransactions, setAllTransactions] = useState<Transaction[]>([]);
-  // The PostgreSQL inventory is the authoritative all-history vault for the
+  // The Cloudflare D1 inventory is the authoritative all-history vault for the
   // administrator. Other users retain their privacy-scoped local calculation.
   const [databaseVault, setDatabaseVault] = useState<NoteCounts | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -255,7 +255,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       return { confirmedIds: [] as string[], pendingIds: [] as string[] };
     }
 
-    // A temporary/recovered transaction never reached PostgreSQL, so deleting its
+    // A temporary/recovered transaction never reached Cloudflare D1, so deleting its
     // local copy completes the operation without a remote request.
     const localOnlyIds = queuedIds.filter(id => id.startsWith('temp_') || id.startsWith('recovered_'));
     if (localOnlyIds.length > 0) {
@@ -281,23 +281,23 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     pendingDeleteFlushInProgressRef.current = true;
         const confirmedIds: string[] = [];
     try {
-      console.log(`📤 Replaying ${realIds.length} queued deletion(s) to Aiven PostgreSQL...`);
+      console.log(`📤 Replaying ${realIds.length} queued deletion(s) to Cloudflare D1...`);
       // Prefer one atomic request so a bulk delete cannot leave a client-visible
       // partial state while individual DELETE requests are still in flight.
       const bulkConfirmedIds = await d1Database.deleteTransactions(realIds);
       if (bulkConfirmedIds !== null) {
         confirmedIds.push(...realIds.filter(id => bulkConfirmedIds.includes(id)));
-        console.log(`✅ Bulk Aiven PostgreSQL delete confirmed: ${confirmedIds.length}/${realIds.length}`);
+        console.log(`✅ Bulk Cloudflare D1 delete confirmed: ${confirmedIds.length}/${realIds.length}`);
       } else {
         // Older deployments may not have the bulk route yet. Keep the safe,
-        // idempotent per-row fallback until Render finishes deploying the route.
+        // idempotent per-row fallback until the Worker is deployed with the bulk route.
         for (const id of realIds) {
           const deleted = await d1Database.deleteTransaction(id);
           if (deleted) {
             confirmedIds.push(id);
-            console.log(`✅ Queued Aiven PostgreSQL delete confirmed: ${id}`);
+            console.log(`✅ Queued Cloudflare D1 delete confirmed: ${id}`);
           } else {
-            console.warn(`⚠️ Queued Aiven PostgreSQL delete still pending: ${id}`);
+            console.warn(`⚠️ Queued Cloudflare D1 delete still pending: ${id}`);
           }
         }
       }
@@ -547,7 +547,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
     setSyncStatus('syncing');
     try {
-      console.log('🔄 Starting manual sync with Aiven PostgreSQL...');
+      console.log('🔄 Starting manual sync with Cloudflare D1...');
 
       const queuedDeleteResult = await flushPendingDeletes();
       if (queuedDeleteResult.confirmedIds.length > 0) {
@@ -557,13 +557,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       const localTransactions = await localDB.getTransactions();
       console.log(`💿 Loaded ${localTransactions.length} local transactions for sync.`);
 
-      // ✅ Upload any unsynced (offline) local transactions to Aiven PostgreSQL first
+      // ✅ Upload any unsynced (offline) local transactions to Cloudflare D1 first
       // FIX: !tx.isSynced covers both false AND undefined (older records)
       const unsyncedLocal = localTransactions.filter(tx => !tx.isSynced);
       const idRecordMap: Record<string, string> = {};
 
       for (const localTx of unsyncedLocal) {
-        console.log(`📤 Uploading offline transaction ${localTx.id} to Aiven PostgreSQL.`);
+        console.log(`📤 Uploading offline transaction ${localTx.id} to Cloudflare D1.`);
         if (!localTx.id.toString().startsWith('temp_') && !localTx.id.toString().startsWith('recovered_')) {
           const updated = await d1Database.updateTransaction(localTx);
           if (updated) {
@@ -598,8 +598,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         }
       }
 
-      // Step 3: Aiven PostgreSQL se incremental/full fetch depending on local data
-      console.log('📥 Fetching latest data from Aiven PostgreSQL...');
+      // Step 3: Cloudflare D1 se incremental/full fetch depending on local data
+      console.log('📥 Fetching latest data from Cloudflare D1...');
 
       const numericIds = localTransactions
         .map(tx => parseInt(tx.id))
@@ -628,23 +628,19 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         const pendingInMemory = prev.filter(tx => !tx.isSynced);
         let mergedList: Transaction[];
         if (isFullSync) {
-          // ✅ FIX: Full sync mein recently-updated transactions ko Aiven PostgreSQL stale data se bachao
-          const serverIds = new Set(syncedFromServer.map(tx => tx.id));
-          const localSyncedNotInServer = prev.filter(tx =>
-            tx.isSynced && !serverIds.has(tx.id)
-          );
-
-          // Local priority: pending (editing) + recently updated (Aiven PostgreSQL might be stale)
+          // ✅ FIX: Full sync mein recently-updated transactions ko Cloudflare D1 stale data se bachao
+          // A full sync is authoritative. A synced local row missing from the
+          // server is a confirmed remote delete and must not be carried forward.
+          // Only pending edits/new offline rows remain local-priority.
           const localPriorityIds = new Set([
             ...pendingInMemory.map(tx => tx.id),
             ...pendingUpdateIdsRef.current,
             ...recentlyUpdatedIdsRef.current,
           ]);
           const filteredServerData = syncedFromServer.filter(tx => !localPriorityIds.has(tx.id));
-          const filteredLocalSynced = localSyncedNotInServer.filter(tx => !localPriorityIds.has(tx.id));
           const localPriorityTxs = prev.filter(tx => localPriorityIds.has(tx.id));
 
-          mergedList = [...filteredServerData, ...filteredLocalSynced, ...localPriorityTxs];
+          mergedList = [...filteredServerData, ...localPriorityTxs];
         } else {
           // Incremental: only add NEW records from server, keep existing synced locals
           const serverIds = new Set(syncedFromServer.map(tx => tx.id));
@@ -731,7 +727,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     if (hasInitialLoadRun.current) return; // Already ran — skip
     hasInitialLoadRun.current = true;
 
-    // App open hone par SIRF EK BAAR Aiven PostgreSQL se sync karo
+    // App open hone par SIRF EK BAAR Cloudflare D1 se sync karo
     const initialLoad = async () => {
       setSyncStatus('syncing');
       try {
@@ -753,7 +749,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // IndexedDB data is shown above immediately; a new APK receives only the
         // newest slice instead of waiting for all 10,616 rows to deserialize.
         d1Database.initializeDatabase().catch(e => console.warn('DB init error (background):', e));
-        console.log('📥 Initial Sync: fetching the newest 1,000 Aiven PostgreSQL records.');
+        console.log('📥 Initial Sync: fetching the newest 1,000 Cloudflare D1 records.');
         const fetched: Transaction[] = await d1Database.getRecentTransactions(1_000);
         // Seven rows only: this never delays the first transaction screen.
         void refreshScopedDatabaseVault();
@@ -786,7 +782,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           }
 
         } else {
-          console.log('ℹ️ No recent records returned from Aiven PostgreSQL. Using local data.');
+          console.log('ℹ️ No recent records returned from Cloudflare D1. Using local data.');
           if (localTransactions.length > 0) {
             setAllTransactions(sortTransactionsByDate(filterDeletedIds(localTransactions)));
           }
@@ -937,7 +933,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         setDatabaseConnected(true);
       } catch (error) {
         setDatabaseConnected(false);
-        console.error('Full Aiven PostgreSQL refresh failed:', error);
+        console.error('Full Cloudflare D1 refresh failed:', error);
       } finally {
         syncInProgressRef.current = false;
 
@@ -1050,7 +1046,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           let ignoredBecauseLocalUpdatePending = false;
           setAllTransactions(prev => {
             // A delayed socket payload must never replace an optimistic local edit that
-            // is still waiting for its own PostgreSQL PUT acknowledgement.
+            // is still waiting for its own Cloudflare D1 PUT acknowledgement.
             const localPendingEdit = prev.find(tx =>
               (tx.id === incomingTx.id || (previousTx?.id && tx.id === previousTx.id)) && !tx.isSynced
             );
@@ -1095,7 +1091,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
               await localDB.deleteTransaction(id);
             }
           } catch (e) { console.error('LocalDB Delete Error:', e); }
-          // ✅ No full Aiven PostgreSQL refresh needed — socket already sent correct IDs to remove
+          // ✅ No full Cloudflare D1 refresh needed — socket already sent correct IDs to remove
         }
 
         // Direct socket state merge ke baad Aiven database se reconcile karo.
@@ -1194,14 +1190,14 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       // ✅ STEP 2: UI turant update karo (LocalDB save ke baad)
       setAllTransactions(prev => [newTransaction, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
 
-      // STEP 3: Every new entry attempts the PostgreSQL write immediately. databaseConnected is
+      // STEP 3: Every new entry attempts the Cloudflare D1 write immediately. databaseConnected is
       // only an observed connection state; it must never decide whether a user write is sent.
       (async () => {
         try {
           let transactionForServer: Transaction = newTransaction;
 
           // Receipt media belongs in Discord. A receipt-upload failure must not prevent the
-          // financial transaction itself from reaching PostgreSQL.
+          // financial transaction itself from reaching Cloudflare D1.
           if (slipToStore && slipToStore.startsWith('data:')) {
             console.log('📤 Uploading slip to Discord in background...');
             try {
@@ -1240,7 +1236,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         } catch (e) {
           // Keep the local isSynced:false record so the normal sync queue can retry it.
           setDatabaseConnected(false);
-          console.error("Background PostgreSQL save error:", e);
+          console.error("Background Cloudflare D1 save error:", e);
         }
       })();
 
@@ -1297,7 +1293,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
       (async () => {
         setSyncStatus('syncing');
-        // The connection flag is diagnostic only. Always attempt both PostgreSQL writes.
+        // The connection flag is diagnostic only. Always attempt both Cloudflare D1 writes.
         const [serverIdDebit, serverIdCredit] = await Promise.all([
           d1Database.addTransaction(newDebitTransaction),
           d1Database.addTransaction(newCreditTransaction),
@@ -1325,7 +1321,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             // Notify other devices about new forward entry with real IDs
             realtimeSync.notifyUpdate({ action: 'add', transaction: syncDebit });
             realtimeSync.notifyUpdate({ action: 'add', transaction: syncCredit });
-            console.log(`✅ Forward entry synced to Aiven PostgreSQL: ${serverIdDebit}, ${serverIdCredit}`);
+            console.log(`✅ Forward entry synced to Cloudflare D1: ${serverIdDebit}, ${serverIdCredit}`);
           } else {
             // ✅ FIX: Partial upload — jo upload hua uska ID update karo, jo nahi hua woh isSynced:false rahe (retry on next sync)
             console.warn(`⚠️ Forward entry partial upload: debit=${serverIdDebit}, credit=${serverIdCredit}. Missing ones will retry on next sync.`);
@@ -1430,7 +1426,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         setDatabaseConnected(allWritesSucceeded);
       })().catch(error => {
         setDatabaseConnected(false);
-        console.error('Failed to save settlement transactions to PostgreSQL:', error);
+        console.error('Failed to save settlement transactions to Cloudflare D1:', error);
       });
     } catch (error) {
       console.error('Settlement transaction failed:', error);
@@ -1445,7 +1441,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       ? { ...updatedTransaction, date: new Date(updatedTransaction.manualDate).toISOString() }
       : { ...updatedTransaction };
 
-    // An edit remains local-priority until PostgreSQL confirms its write. This prevents a
+    // An edit remains local-priority until Cloudflare D1 confirms its write. This prevents a
     // polling snapshot or a delayed socket event from temporarily restoring the old row.
     const optimisticUpdate: Transaction = { ...normalizedTransaction, isSynced: false };
     pendingUpdateIdsRef.current.add(optimisticUpdate.id);
@@ -1467,7 +1463,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
     // Vault and Balances update automatically via useMemo when allTransactions changes
 
-    // Save flow tabhi successful mana jayega jab PostgreSQL PUT confirm ho.
+    // Save flow tabhi successful mana jayega jab Cloudflare D1 PUT confirm ho.
     // Edit page is promise ko await karta hai, isliye false-success redirect nahi hoga.
     await (async () => {
       try {
@@ -1535,7 +1531,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           await localDB.saveTransaction(unsyncedUpdate);
           setAllTransactions(prev => prev.map(tx => tx.id === unsyncedUpdate.id ? unsyncedUpdate : tx));
           setDatabaseConnected(false);
-          console.log(`📴 Offline update saved locally; queued for Aiven PostgreSQL sync upon reconnect.`);
+          console.log(`📴 Offline update saved locally; queued for Cloudflare D1 sync upon reconnect.`);
           // Graceful success for offline edit — do not throw error so user workflow is uninterrupted.
           return;
         }
@@ -1599,7 +1595,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       setDatabaseConnected(false);
       console.log(`📴 ${queuedDeleteResult.pendingIds.length} deletion(s) remain queued for the next reconnect.`);
     } else if (queuedDeleteResult.confirmedIds.length > 0) {
-      console.log(`✅ Aiven PostgreSQL delete confirmed for ${queuedDeleteResult.confirmedIds.length} transaction(s).`);
+      console.log(`✅ Cloudflare D1 delete confirmed for ${queuedDeleteResult.confirmedIds.length} transaction(s).`);
       lastFetchTimeRef.current = 0;
     }
 

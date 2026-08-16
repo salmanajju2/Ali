@@ -1,0 +1,8 @@
+name = "ali-enterprises-d1-worker"
+main = "cloudflare-d1-worker.js"
+compatibility_date = "2024-04-04"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ali"
+database_id = "4e4282bc-f6bc-483c-a3e3-2e8afd1ed49e"

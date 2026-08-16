@@ -216,11 +216,14 @@ export class D1DatabaseService {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ action: 'delete', id: idToSend })
+        body: JSON.stringify({ action: 'delete', id: idToSend, data: { id: idToSend } })
       });
       const result = await response.json().catch(() => null);
-      // ✅ FIX: JSON result.success bhi check karo — sirf HTTP 200 kaafi nahi
-      return response.ok && (result?.success !== false);
+      // A successful HTTP response is not enough: the Worker must confirm that
+      // the row was deleted or was already absent. Otherwise the durable queue
+      // must keep retrying instead of allowing a ghost row to resurrect.
+      const acknowledged = result?.alreadyDeleted === true || Number(result?.changes || 0) > 0;
+      return response.ok && result?.success === true && acknowledged;
     } catch (error) {
       console.error('Failed to delete transaction from D1:', error);
       return false;
@@ -359,20 +362,71 @@ export class D1DatabaseService {
     return confirmed.length > 0 ? confirmed : null;
   }
 
-  async getTransactionChanges(_cursor: number, _limit: number): Promise<{ changes: any[], cursor: number, hasMore: boolean, nextCursor: string }> {
-    return { changes: [], cursor: Date.now(), hasMore: false, nextCursor: String(_cursor) };
+  async getTransactionChanges(cursor: number, limit: number): Promise<{ changes: any[], cursor: number, hasMore: boolean, nextCursor: string }> {
+    const url = new URL(this.workerUrl);
+    url.searchParams.set('action', 'changes');
+    url.searchParams.set('cursor', String(Math.max(0, cursor || 0)));
+    url.searchParams.set('limit', String(Math.min(Math.max(limit || 500, 1), 1000)));
+    url.searchParams.set('_t', String(Date.now()));
+
+    const response = await this.fetchWithTimeout(url.toString(), {
+      method: 'GET',
+      headers: { Accept: 'application/json', 'Cache-Control': 'no-store' },
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`Failed to fetch D1 changes, HTTP Status: ${response.status}`);
+    const data = await response.json();
+    return {
+      changes: Array.isArray(data.changes) ? data.changes : [],
+      cursor: Number(data.cursor || cursor || 0),
+      hasMore: Boolean(data.hasMore),
+      nextCursor: String(data.nextCursor ?? cursor ?? 0),
+    };
   }
 
   async getCashNoteInventory(): Promise<{ counts: any }> {
-    return { counts: {} };
+    const url = new URL(this.workerUrl);
+    url.searchParams.set('action', 'inventory');
+    url.searchParams.set('_t', String(Date.now()));
+    const response = await this.fetchWithTimeout(url.toString(), { method: 'GET', cache: 'no-store' });
+    if (!response.ok) throw new Error(`Failed to fetch D1 inventory, HTTP Status: ${response.status}`);
+    const data = await response.json();
+    return { counts: data?.counts || {} };
   }
 
-  async getUserCashNoteInventory(_keys: any): Promise<{ counts: any }> {
-    return { counts: {} };
+  async getUserCashNoteInventory(keys: any): Promise<{ counts: any }> {
+    // The worker exposes a narrow recordedBy filter. If several identity keys exist,
+    // fetch the authoritative rows once and calculate the user's inventory locally.
+    const all = await this.getAllTransactions(-1);
+    const identityKeys = keys instanceof Set ? keys : new Set(Array.isArray(keys) ? keys : []);
+    const counts: Record<string, number> = {};
+    for (const tx of all) {
+      const recordedBy = String(tx.recordedBy || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      const compact = recordedBy.replace(/[^a-z0-9@.]/g, '');
+      if (identityKeys.size > 0 && !identityKeys.has(recordedBy) && !identityKeys.has(compact)) continue;
+      if (tx.paymentMethod !== 'cash' || !tx.breakdown || typeof tx.breakdown !== 'object') continue;
+      for (const [denomination, count] of Object.entries(tx.breakdown)) {
+        const value = Number(count || 0);
+        counts[denomination] = (counts[denomination] || 0) + (tx.type === 'credit' ? value : -value);
+      }
+    }
+    return { counts };
   }
 
-  async getTransactionsModifiedSince(_timestamp: any): Promise<Transaction[]> {
-    return this.getAllTransactions(-1);
+  async getTransactionsModifiedSince(timestamp: any): Promise<Transaction[]> {
+    const url = new URL(this.workerUrl);
+    url.searchParams.set('action', 'modifiedSince');
+    const parsed = timestamp instanceof Date ? timestamp.getTime() : Date.parse(String(timestamp || ''));
+    url.searchParams.set('since', String(Number.isFinite(parsed) ? parsed : 0));
+    url.searchParams.set('_t', String(Date.now()));
+    const response = await this.fetchWithTimeout(url.toString(), {
+      method: 'GET',
+      headers: { Accept: 'application/json', 'Cache-Control': 'no-store' },
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`Failed to fetch modified D1 transactions, HTTP Status: ${response.status}`);
+    const data = await response.json();
+    return Array.isArray(data.transactions) ? data.transactions.map((row: any) => this.mapRowToTransaction(row)) : [];
   }
 }
 
