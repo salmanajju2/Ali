@@ -529,8 +529,6 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       .catch(error => console.warn('Cash note inventory refresh failed:', error));
   };
   const vault = useMemo(() => {
-    // databaseVault is already scoped to the signed-in user (or the admin's
-    // all-company table), so the Total Vault tab reads just seven DB rows.
     return databaseVault ? { ...initializeVault(), ...databaseVault } : calculatedVault;
   }, [databaseVault, calculatedVault]);
   const bankBalances = useMemo(() => recalculateBankBalances(allTransactions), [allTransactions, recalculateBankBalances]);

@@ -11,7 +11,24 @@ export default defineConfig(({ mode }) => {
             'process.env': {} // Don't dump entire system env
         },
         server: {
-            port: 3000
+            port: 3000,
+            // Needed only for the temporary local test link exposed by the sandbox.
+            allowedHosts: true,
+            // Local test mode keeps the browser same-origin while forwarding API
+            // and Socket.IO traffic to the deployed Aiven-backed backend.
+            proxy: {
+                '/api': {
+                    target: 'https://ali-ltyt.onrender.com',
+                    changeOrigin: true,
+                    secure: true,
+                },
+                '/socket.io': {
+                    target: 'https://ali-ltyt.onrender.com',
+                    changeOrigin: true,
+                    secure: true,
+                    ws: true,
+                },
+            },
         },
         build: {
             outDir: 'dist',
