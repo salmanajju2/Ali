@@ -3,7 +3,7 @@ import { Transaction } from '../types';
 // Configuration for Cloudflare D1 Worker
 const D1_DATABASE_CONFIG = {
   workerUrl: (import.meta.env && import.meta.env.VITE_D1_WORKER_URL) ||
-    'https://ali-enterprises-d1-worker.ali-enterprises.workers.dev',
+    'https://ali3.ali-enterprises.workers.dev',
 };
 
 /**

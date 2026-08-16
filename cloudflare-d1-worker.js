@@ -60,7 +60,7 @@ async function ensureSchema(db) {
   `).run();
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_transaction_changes_cursor ON transaction_changes(change_id)').run();
 
-  // Historical rows imported from db_1 may not have a modification timestamp.
+  // Older imported rows may not have a modification timestamp.
   await db.prepare('UPDATE transactions SET updatedAt = COALESCE(updatedAt, CAST(strftime(\'%s\', date) AS INTEGER) * 1000, ?) WHERE updatedAt IS NULL').bind(Date.now()).run();
 }
 
@@ -79,7 +79,7 @@ function getCorsHeaders(request) {
   const origin = request.headers.get('Origin');
   const allowed = new Set([
     'https://ali3.vercel.app',
-    'https://ali-enterprises-d1-worker.ali-enterprises.workers.dev',
+    'https://ali3.ali-enterprises.workers.dev',
   ]);
   const headers = {
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',

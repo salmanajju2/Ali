@@ -1,4 +1,4 @@
-name = "ali-enterprises-d1-worker"
+name = "ali3"
 main = "cloudflare-d1-worker.js"
 compatibility_date = "2024-04-04"
 
