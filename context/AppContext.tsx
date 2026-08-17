@@ -7,6 +7,7 @@ import { localDB } from '../services/LocalDBService';
 import { sendTelegramMessage, sendTelegramPhoto, deleteTelegramMessage } from '../services/telegramService';
 import { exportDBService } from '../services/ExportDBService';
 import { realtimeSync } from '../services/RealtimeSyncService';
+import { reconcileAuthoritativeFullSync } from '../services/manualSyncReconciliation';
 
 interface AppContextType {
   user: User | null;
@@ -620,23 +621,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         const pendingInMemory = prev.filter(tx => !tx.isSynced);
         let mergedList: Transaction[];
         if (isFullSync) {
-          // ✅ FIX: Full sync mein recently-updated transactions ko Aiven PostgreSQL stale data se bachao
-          const serverIds = new Set(syncedFromServer.map(tx => tx.id));
-          const localSyncedNotInServer = prev.filter(tx =>
-            tx.isSynced && !serverIds.has(tx.id)
-          );
-
-          // Local priority: pending (editing) + recently updated (Aiven PostgreSQL might be stale)
-          const localPriorityIds = new Set([
-            ...pendingInMemory.map(tx => tx.id),
-            ...pendingUpdateIdsRef.current,
-            ...recentlyUpdatedIdsRef.current,
-          ]);
-          const filteredServerData = syncedFromServer.filter(tx => !localPriorityIds.has(tx.id));
-          const filteredLocalSynced = localSyncedNotInServer.filter(tx => !localPriorityIds.has(tx.id));
-          const localPriorityTxs = prev.filter(tx => localPriorityIds.has(tx.id));
-
-          mergedList = [...filteredServerData, ...filteredLocalSynced, ...localPriorityTxs];
+          mergedList = reconcileAuthoritativeFullSync(syncedFromServer, prev);
         } else {
           // Incremental: only add NEW records from server, keep existing synced locals
           const serverIds = new Set(syncedFromServer.map(tx => tx.id));

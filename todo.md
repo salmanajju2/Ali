@@ -11,8 +11,11 @@
 - [x] Test WebSocket-drop offline queueing, conflict resolution, and implement request-triggered Render health wake-up strategy.
 - [x] Verify Render production environment variables and build logs.
 - [ ] Verify whether cron health-check requests reach the Render production logs.
-- [ ] Build and verify a fresh Android debug APK from the current local codebase.
+- [x] Build and verify a fresh Android debug APK from the current local codebase.
 - [x] Build and verify a fresh Android debug APK from the current local codebase.
 - [ ] Attempt APK installation and verify web-to-app real-time sync plus offline queue recovery.
 - [x] Attempt APK installation and verify web-to-app real-time sync plus offline queue recovery.
 - [ ] Review and push current Ali Enterprises changes to GitHub.
+- [x] Review and push current Ali Enterprises changes to GitHub.
+- [x] Fix deleted transactions reappearing after manual sync and run full add/edit/delete/sync regression tests.
+- [ ] Commit and push the verified manual-sync deletion reconciliation fix to GitHub.

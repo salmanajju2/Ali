@@ -2,12 +2,30 @@ import assert from 'assert';
 
 const origin = process.env.ALI_API_ORIGIN || 'https://ali-ltyt.onrender.com';
 
+const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+async function fetchWithRetry(url, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        console.warn(`⚠️ Request attempt ${attempt}/${attempts} failed; retrying after a short delay...`);
+        await delay(attempt * 2_000);
+      }
+    }
+  }
+  throw lastError;
+}
+
 async function runTest() {
   console.log(`🧪 Starting automated pagination and lazy-loading validation test against ${origin}...`);
 
   try {
     // 1. Test /api/transactions/recent as the baseline server endpoint
-    const recentRes = await fetch(`${origin}/api/transactions/recent?limit=5`);
+    const recentRes = await fetchWithRetry(`${origin}/api/transactions/recent?limit=5`);
     assert.strictEqual(recentRes.status, 200, 'Recent transactions endpoint must return HTTP 200');
     const recentData = await recentRes.json();
     assert.ok(Array.isArray(recentData), 'Recent transactions must return an array');
