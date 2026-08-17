@@ -227,6 +227,28 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     } catch { return new Set<string>(); }
   })());
 
+  // A confirmed server delete is retained as a local tombstone. Socket.IO and
+  // refresh responses can arrive out of order on Android after reconnecting; a
+  // late add/update for a deleted numeric ID must never recreate that row.
+  const deletedTombstoneIdsRef = useRef<Set<string>>((() => {
+    try {
+      const saved = localStorage.getItem('deletedTransactionTombstones');
+      return saved ? new Set<string>(JSON.parse(saved).map(String)) : new Set<string>();
+    } catch { return new Set<string>(); }
+  })());
+
+  const rememberDeletedTombstones = (ids: string[]) => {
+    ids.forEach(id => deletedTombstoneIdsRef.current.add(String(id)));
+    try {
+      localStorage.setItem('deletedTransactionTombstones', JSON.stringify([...deletedTombstoneIdsRef.current]));
+    } catch {}
+  };
+
+  const isDeleteProtected = (id: string | number) => {
+    const normalizedId = String(id);
+    return pendingDeleteIdsRef.current.has(normalizedId) || deletedTombstoneIdsRef.current.has(normalizedId);
+  };
+
   const addPendingDeletes = (ids: string[]) => {
     ids.forEach(id => pendingDeleteIdsRef.current.add(id));
     try {
@@ -243,8 +265,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
   // Filter helper — har sync mein use karo
   const filterDeletedIds = (list: Transaction[]): Transaction[] => {
-    if (pendingDeleteIdsRef.current.size === 0) return list;
-    return list.filter(tx => !pendingDeleteIdsRef.current.has(tx.id));
+    if (pendingDeleteIdsRef.current.size === 0 && deletedTombstoneIdsRef.current.size === 0) return list;
+    return list.filter(tx => !isDeleteProtected(tx.id));
   };
 
   // A pending ID is a durable delete intent, not just a UI filter. It remains in
@@ -294,6 +316,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       }
 
       if (confirmedIds.length > 0) {
+        rememberDeletedTombstones(confirmedIds);
         removePendingDeletes(confirmedIds);
       }
 
@@ -364,6 +387,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         const deletedIds = new Set(page.changes
           .filter(change => change.action === 'delete')
           .map(change => String(change.id)));
+        if (deletedIds.size > 0) rememberDeletedTombstones([...deletedIds]);
         const incomingById = new Map<string, Transaction>();
         page.changes.forEach(change => {
           if ((change.action === 'add' || change.action === 'update') && change.transaction) {
@@ -377,10 +401,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
         setAllTransactions(prev => {
           const nextById = new Map<string, Transaction>(prev.map(tx => [String(tx.id), tx] as const));
-          deletedIds.forEach(id => {
-            // A local, durable delete intent already has the desired UI state.
-            if (!pendingDeleteIdsRef.current.has(id)) nextById.delete(id);
-          });
+          deletedIds.forEach(id => nextById.delete(id));
           incomingById.forEach((tx, id) => {
             if (!protectedIds.has(id) && !pendingDeleteIdsRef.current.has(id)) nextById.set(id, tx);
           });
@@ -390,7 +411,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // Persist the same mutations before advancing the cursor. A device that
         // closes immediately after reconciliation therefore opens with the right cache.
         for (const id of deletedIds) {
-          if (!pendingDeleteIdsRef.current.has(id)) await localDB.deleteTransaction(id);
+          await localDB.deleteTransaction(id);
         }
         const cacheable = [...incomingById.entries()]
           .filter(([id]) => !protectedIds.has(id) && !pendingDeleteIdsRef.current.has(id))
@@ -547,6 +568,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         console.log(`✅ Manual sync confirmed ${queuedDeleteResult.confirmedIds.length} queued deletion(s).`);
       }
 
+      // A device can miss the website's Socket.IO delete while it is closed.
+      // Replay the durable change cursor before any local-cache/server merge so
+      // those rows become protected tombstones first.
+      await reconcileDurableTransactionChanges();
+
       const localTransactions = await localDB.getTransactions();
       console.log(`💿 Loaded ${localTransactions.length} local transactions for sync.`);
 
@@ -607,7 +633,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         fetchedTransactions = await aivenDatabase.getNewTransactions(maxId);
       } else {
         console.log('🔄 Performing Full Sync...');
-        fetchedTransactions = await aivenDatabase.getAllTransactions(-1);
+        fetchedTransactions = await aivenDatabase.getCompleteTransactionSnapshot();
         isFullSync = true;
       }
       console.log(`📥 Manual Sync: Received ${fetchedTransactions.length} records for reconciliation.`);
@@ -621,7 +647,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         const pendingInMemory = prev.filter(tx => !tx.isSynced);
         let mergedList: Transaction[];
         if (isFullSync) {
-          mergedList = reconcileAuthoritativeFullSync(syncedFromServer, prev);
+          mergedList = reconcileAuthoritativeFullSync(
+            syncedFromServer,
+            prev,
+            [...deletedTombstoneIdsRef.current]
+          );
         } else {
           // Incremental: only add NEW records from server, keep existing synced locals
           const serverIds = new Set(syncedFromServer.map(tx => tx.id));
@@ -718,6 +748,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         if (queuedDeleteResult.confirmedIds.length > 0) {
           console.log(`✅ App-open sync confirmed ${queuedDeleteResult.confirmedIds.length} queued deletion(s).`);
         }
+
+        await reconcileDurableTransactionChanges();
 
         const localTransactions = await localDB.getTransactions();
         if (localTransactions && localTransactions.length > 0) {
@@ -972,8 +1004,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
           // ✅ BUG FIX: Agar yeh transaction delete ho chuki hai (pendingDeleteIds mein hai)
           // toh socket se aayi bhi ho toh wapas mat add karo — yahi ghost transaction ka cause tha!
-          if (pendingDeleteIdsRef.current.has(incomingTx.id)) {
-            console.log(`🚫 Socket 'add' blocked — transaction ${incomingTx.id} is in pendingDeleteIds (deleted locally).`);
+          if (isDeleteProtected(incomingTx.id)) {
+            console.log(`🚫 Socket 'add' blocked — transaction ${incomingTx.id} is protected by a local delete tombstone.`);
             return;
           }
 
@@ -986,7 +1018,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             if (exactMatch) return prev; // Already up-to-date, no change needed
 
             // ✅ BUG FIX: deleted IDs ko filter karo state update mein bhi
-            if (pendingDeleteIdsRef.current.has(incomingTx.id)) return prev;
+            if (isDeleteProtected(incomingTx.id)) return prev;
 
             const existingDuplicate = prev.find(tx => isDuplicateTransaction(tx, incomingTx));
 
@@ -1007,7 +1039,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           });
 
           // ✅ BUG FIX: pendingDelete mein hai toh LocalDB mein bhi mat save karo
-          if (!pendingDeleteIdsRef.current.has(incomingTx.id)) {
+          if (!isDeleteProtected(incomingTx.id)) {
             localDB.saveTransaction(incomingTx).catch(e => console.error('LocalDB Add Error:', e));
           }
           for (const tempId of tempIdsToDelete) {
@@ -1018,7 +1050,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           const incomingTx = { ...remoteData.transaction, isSynced: true };
 
           // ✅ BUG FIX: Delete ho chuki transaction ka update bhi ignore karo
-          if (pendingDeleteIdsRef.current.has(incomingTx.id)) {
+          if (isDeleteProtected(incomingTx.id)) {
             console.log(`🚫 Socket 'update' blocked — transaction ${incomingTx.id} is deleted locally.`);
             return;
           }
@@ -1051,7 +1083,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
             if (!found) {
               // ✅ BUG FIX: Sirf add karo agar deleted nahi hai
-              if (!pendingDeleteIdsRef.current.has(incomingTx.id)) {
+              if (!isDeleteProtected(incomingTx.id)) {
                 next.unshift(incomingTx);
               }
             }
@@ -1060,15 +1092,18 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             return next;
           });
           // Never persist a delayed socket payload over a local pending edit or a deleted row.
-          if (!ignoredBecauseLocalUpdatePending && !pendingDeleteIdsRef.current.has(incomingTx.id)) {
+          if (!ignoredBecauseLocalUpdatePending && !isDeleteProtected(incomingTx.id)) {
             try { await localDB.saveTransaction(incomingTx); } catch (e) { console.error('LocalDB Update Error:', e); }
           }
         }
         else if (remoteData.action === 'delete' && remoteData.ids) {
-          setAllTransactions(prev => prev.filter(tx => !remoteData.ids.includes(tx.id)));
+          const deletedIds = remoteData.ids.map((id: string | number) => String(id));
+          const deletedIdSet = new Set(deletedIds);
+          rememberDeletedTombstones(deletedIds);
+          setAllTransactions(prev => prev.filter(tx => !deletedIdSet.has(String(tx.id))));
           // Also remove from LocalDB in background
           try {
-            for (const id of remoteData.ids) {
+            for (const id of deletedIds) {
               await localDB.deleteTransaction(id);
             }
           } catch (e) { console.error('LocalDB Delete Error:', e); }

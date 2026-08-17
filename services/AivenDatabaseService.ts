@@ -135,6 +135,38 @@ export class AivenDatabaseService {
     }
   }
 
+  // A manual full sync must retrieve every server row, not the API's bounded
+  // newest-window response. This keeps a large APK cache from being replaced by
+  // an incomplete snapshot after a user presses Sync.
+  async getCompleteTransactionSnapshot(pageSize = 1_000): Promise<any[]> {
+    const safePageSize = Math.min(Math.max(Math.floor(pageSize), 1), 2_000);
+    const snapshot: any[] = [];
+    const seenIds = new Set<string>();
+    let beforeId: string | undefined;
+
+    while (true) {
+      const page = await this.getTransactionPage(safePageSize, beforeId);
+      if (page.length === 0) break;
+
+      for (const transaction of page) {
+        const id = String(transaction.id);
+        if (!seenIds.has(id)) {
+          seenIds.add(id);
+          snapshot.push(transaction);
+        }
+      }
+
+      if (page.length < safePageSize) break;
+      const nextBeforeId = String(page[page.length - 1]?.id ?? '');
+      if (!nextBeforeId || nextBeforeId === beforeId) {
+        throw new Error('Transaction pagination did not advance; full sync was stopped safely.');
+      }
+      beforeId = nextBeforeId;
+    }
+
+    return snapshot;
+  }
+
   async getTransactionsModifiedSince(sinceIsoString: string): Promise<any[]> {
     try {
       const query = sinceIsoString ? `?since=${encodeURIComponent(sinceIsoString)}` : '';

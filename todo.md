@@ -22,3 +22,4 @@
 - [x] Cancel automatic Forward Day scheduling and remove its server routes/helpers while preserving manual Forward Day and historical transaction data.
 - [x] Diagnose and fix missing or delayed web-to-APK and APK-to-web real-time transaction synchronization, then rebuild the APK.
 - [x] Fix incorrect closing balance when cash transactions are displayed, including cache and sync reconciliation checks.
+- [x] Diagnose and fix APK sync failures, missing web-to-APK data, and deleted transaction resurrection with full cross-device regression coverage.

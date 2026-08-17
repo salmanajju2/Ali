@@ -54,3 +54,13 @@ test('manual full sync handles an empty authoritative dataset without resurrecti
 
   assert.deepEqual(result, []);
 });
+
+test('confirmed delete tombstones block delayed server rows and unsynced local copies', () => {
+  const result = reconcileAuthoritativeFullSync(
+    [transaction('deleted-on-server'), transaction('keep')],
+    [transaction('deleted-on-server', false), transaction('offline-keep', false)],
+    ['deleted-on-server']
+  );
+
+  assert.deepEqual(result.map(item => item.id), ['keep', 'offline-keep']);
+});
