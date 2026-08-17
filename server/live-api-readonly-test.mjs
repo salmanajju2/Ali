@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
 
 const origin = process.env.ALI_API_ORIGIN || 'https://ali-ltyt.onrender.com';
+const testToken = process.env.TEST_FIREBASE_ID_TOKEN || '';
+if (!testToken) {
+  console.log('⏭️ Skipped: set TEST_FIREBASE_ID_TOKEN to run authenticated live API checks.');
+  process.exit(0);
+}
+const authOptions = { headers: { Authorization: `Bearer ${testToken}` } };
 
 async function request(path, options) {
-  const response = await fetch(`${origin}${path}`, options);
+  const response = await fetch(`${origin}${path}`, { ...authOptions, ...options, headers: { ...authOptions.headers, ...(options?.headers || {}) } });
   const body = await response.json().catch(() => null);
   return { response, body };
 }

@@ -1,13 +1,13 @@
 // Native APKs are served from a local WebView origin, so proxy calls must use
 // the public Render backend instead of window.location.origin.
 import { API_ORIGIN } from './apiConfig';
-import { getSessionToken } from '../context/AuthContext';
+import { refreshSessionToken } from '../context/AuthContext';
 
 const PROXY_SERVER = API_ORIGIN;
 
-const proxyFetch = (url: string, init: RequestInit = {}) => {
+const proxyFetch = async (url: string, init: RequestInit = {}) => {
   const headers = new Headers(init.headers);
-  const token = getSessionToken();
+  const token = await refreshSessionToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return fetch(url, { ...init, headers, credentials: 'omit' });
 };

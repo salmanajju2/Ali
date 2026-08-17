@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getTelegramPhotoUrl } from '../services/telegramService';
 import { API_ORIGIN } from '../services/apiConfig';
-import { getSessionToken } from '../context/AuthContext';
+import { refreshSessionToken } from '../context/AuthContext';
 
 const PROXY_SERVER = API_ORIGIN;
 
@@ -25,7 +25,7 @@ const fetchPdfBytes = async (telegramUrl: string): Promise<ArrayBuffer> => {
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const headers = new Headers();
-    const token = getSessionToken();
+    const token = await refreshSessionToken();
     if (token) headers.set('Authorization', `Bearer ${token}`);
     const resp = await fetch(proxyUrl, { headers, credentials: 'omit', signal: controller.signal });
     if (!resp.ok) throw new Error(`Proxy fetch failed: ${resp.status}`);

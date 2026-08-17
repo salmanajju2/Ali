@@ -1,6 +1,6 @@
 // PostgreSQL Database service via Backend API
 import { API_ORIGIN } from './apiConfig';
-import { getSessionToken } from '../context/AuthContext';
+import { refreshSessionToken } from '../context/AuthContext';
 
 export class AivenDatabaseService {
   private static instance: AivenDatabaseService;
@@ -25,7 +25,7 @@ export class AivenDatabaseService {
       const timeoutId = setTimeout(() => controller.abort(), this.FETCH_TIMEOUT_MS);
       try {
         const headers = new Headers(options.headers);
-        const token = getSessionToken();
+        const token = await refreshSessionToken();
         if (token) headers.set('Authorization', `Bearer ${token}`);
         const response = await fetch(url, {
           ...options,

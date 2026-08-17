@@ -1,6 +1,8 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const { cert, getApps, initializeApp } = require('firebase-admin/app');
+const { getAuth: getFirebaseAdminAuth } = require('firebase-admin/auth');
 const cors = require('cors');
 const path = require('path');
 const { Pool } = require('pg');
@@ -22,6 +24,30 @@ const adminEmails = new Set(
     .map(email => email.trim().toLowerCase())
     .filter(Boolean)
 );
+
+let firebaseAuthAdmin;
+function getVerifiedFirebaseAuth() {
+  if (firebaseAuthAdmin) return firebaseAuthAdmin;
+  let serviceAccount;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    try {
+      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    } catch {
+      throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON.');
+    }
+  } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+    serviceAccount = {
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    };
+  } else {
+    throw new Error('Firebase Admin credentials are not configured.');
+  }
+  const app = getApps().length ? getApps()[0] : initializeApp({ credential: cert(serviceAccount) });
+  firebaseAuthAdmin = getFirebaseAdminAuth(app);
+  return firebaseAuthAdmin;
+}
 
 const corsOptions = {
   origin(origin, callback) {
@@ -104,22 +130,61 @@ async function findSessionUser(token) {
   return result.rows[0] || null;
 }
 
+async function findOrCreateFirebaseUser(decodedToken) {
+  const email = normaliseEmail(decodedToken.email);
+  if (!email) throw new Error('Firebase account has no verified email address.');
+  const displayName = String(decodedToken.name || email.split('@')[0] || 'User').trim().slice(0, 100);
+  const existing = await pool.query(
+    `SELECT id, email, display_name, is_admin, firebase_uid
+     FROM app_users
+     WHERE firebase_uid=$1 OR email=$2
+     ORDER BY CASE WHEN firebase_uid=$1 THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [decodedToken.uid, email]
+  );
+  if (existing.rowCount > 0) {
+    const row = existing.rows[0];
+    const updated = await pool.query(
+      `UPDATE app_users
+       SET firebase_uid=$1, email=$2, display_name=COALESCE(NULLIF(display_name, ''), $3)
+       WHERE id=$4
+       RETURNING id, email, display_name, is_admin, firebase_uid`,
+      [decodedToken.uid, email, displayName, row.id]
+    );
+    return updated.rows[0];
+  }
+  const created = await pool.query(
+    `INSERT INTO app_users (id, email, password_hash, firebase_uid, display_name, is_admin)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id, email, display_name, is_admin, firebase_uid`,
+    [randomUUID(), email, hashPassword(randomUUID()), decodedToken.uid, displayName, adminEmails.has(email)]
+  );
+  return created.rows[0];
+}
+
+async function verifyFirebaseRequestToken(token) {
+  if (!token) return null;
+  const decodedToken = await getVerifiedFirebaseAuth().verifyIdToken(token);
+  return findOrCreateFirebaseUser(decodedToken);
+}
+
 async function requireAuth(req, res, next) {
   try {
     await schemaReady;
-    const user = await findSessionUser(getBearerToken(req));
+    const user = await verifyFirebaseRequestToken(getBearerToken(req));
     if (!user) return res.status(401).json({ error: 'Sign-in required.' });
     req.authUser = user;
     return next();
   } catch (error) {
-    console.error('Authentication lookup failed:', error);
-    return res.status(503).json({ error: 'Authentication service temporarily unavailable.' });
+    console.error('Firebase authentication lookup failed:', error?.message || error);
+    const status = error?.code === 'auth/id-token-expired' || error?.code === 'auth/argument-error' ? 401 : 503;
+    return res.status(status).json({ error: status === 401 ? 'Firebase session expired. Please sign in again.' : 'Authentication service temporarily unavailable.' });
   }
 }
 
 function createPublicUser(row) {
   return {
-    uid: row.id,
+    uid: row.firebase_uid || row.id,
     email: row.email,
     displayName: row.display_name || row.email.split('@')[0],
     isAdmin: Boolean(row.is_admin),
@@ -261,11 +326,14 @@ async function ensureTransactionSchema() {
       id UUID PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
+      firebase_uid TEXT UNIQUE,
       display_name TEXT,
       is_admin BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS firebase_uid TEXT UNIQUE`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_sessions (
@@ -506,86 +574,23 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-// 4. Aiven PostgreSQL authentication (replaces Firebase Auth)
-app.post('/api/auth/register', async (req, res) => {
-  const email = normaliseEmail(req.body?.email);
-  const password = String(req.body?.password || '');
-  const displayName = String(req.body?.displayName || email.split('@')[0] || 'User').trim().slice(0, 100);
-  if (!/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
-    return res.status(400).json({ error: 'Use a valid email address and a password with at least 8 characters.' });
-  }
-  await withDatabase(res, async () => {
-    const id = randomUUID();
-    const isAdmin = adminEmails.has(email);
-    let result;
-    try {
-      result = await pool.query(
-        `INSERT INTO app_users (id, email, password_hash, display_name, is_admin)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, email, display_name, is_admin`,
-        [id, email, hashPassword(password), displayName, isAdmin]
-      );
-    } catch (error) {
-      if (error?.code === '23505') return res.status(409).json({ error: 'This email already has an account.' });
-      throw error;
-    }
-    const token = randomBytes(32).toString('hex');
-    await pool.query(
-      `INSERT INTO app_sessions (token_hash, user_id, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-      [hashSessionToken(token), id,]
-    );
-    res.status(201).json({ user: createPublicUser(result.rows[0]), token });
-  });
+// 4. Firebase Authentication + Aiven PostgreSQL application profile.
+// Firebase owns email/password identity; Aiven stores only the application profile,
+// role and all business data. The client sends a Firebase ID token on every API call.
+app.post('/api/auth/register', (_req, res) => {
+  res.status(410).json({ error: 'Create the account through Firebase Authentication.' });
 });
 
-app.post('/api/auth/login', async (req, res) => {
-  const email = normaliseEmail(req.body?.email);
-  const password = String(req.body?.password || '');
-  await withDatabase(res, async () => {
-    const result = await pool.query(
-      'SELECT id, email, password_hash, display_name, is_admin FROM app_users WHERE email=$1',
-      [email]
-    );
-    const user = result.rows[0];
-    if (!user || !verifyPassword(password, user.password_hash)) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
-    }
-    const token = randomBytes(32).toString('hex');
-    await pool.query(
-      `INSERT INTO app_sessions (token_hash, user_id, expires_at)
-       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-      [hashSessionToken(token), user.id]
-    );
-    res.json({ user: createPublicUser(user), token });
-  });
+app.post('/api/auth/login', (_req, res) => {
+  res.status(410).json({ error: 'Sign in through Firebase Authentication.' });
 });
 
-app.get('/api/auth/me', async (req, res) => {
-  const token = getBearerToken(req);
-  if (!token) return res.status(401).json({ error: 'Sign-in required.' });
-  await withDatabase(res, async () => {
-    const result = await pool.query(
-      `SELECT u.id, u.email, u.display_name, u.is_admin
-       FROM app_sessions s
-       INNER JOIN app_users u ON u.id=s.user_id
-       WHERE s.token_hash=$1 AND s.expires_at > NOW()`,
-      [hashSessionToken(token)]
-    );
-    if (result.rowCount === 0) return res.status(401).json({ error: 'Session expired. Please sign in again.' });
-    res.json({ user: createPublicUser(result.rows[0]) });
-  });
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ user: createPublicUser(req.authUser) });
 });
 
-app.post('/api/auth/logout', async (req, res) => {
-  const token = getBearerToken(req);
-  if (token) {
-    await withDatabase(res, async () => {
-      await pool.query('DELETE FROM app_sessions WHERE token_hash=$1', [hashSessionToken(token)]);
-      res.json({ ok: true });
-    });
-    return;
-  }
+app.post('/api/auth/logout', (_req, res) => {
+  // Firebase sign-out is performed by the client. No Firebase credential is stored here.
   res.json({ ok: true });
 });
 
@@ -1234,7 +1239,7 @@ const io = new Server(server, {
 io.use(async (socket, next) => {
   try {
     await schemaReady;
-    const user = await findSessionUser(socket.handshake.auth?.token);
+    const user = await verifyFirebaseRequestToken(socket.handshake.auth?.token);
     if (!user) return next(new Error('Sign-in required.'));
     socket.data.user = user;
     return next();

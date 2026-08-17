@@ -1,6 +1,8 @@
 import assert from 'assert';
 
 const origin = process.env.ALI_API_ORIGIN || 'https://ali-ltyt.onrender.com';
+const testToken = process.env.TEST_FIREBASE_ID_TOKEN || '';
+const requestHeaders = testToken ? { Authorization: `Bearer ${testToken}` } : {};
 
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
@@ -8,7 +10,7 @@ async function fetchWithRetry(url, attempts = 3) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      return await fetch(url, { headers: requestHeaders, signal: AbortSignal.timeout(30_000) });
     } catch (error) {
       lastError = error;
       if (attempt < attempts) {
@@ -22,6 +24,10 @@ async function fetchWithRetry(url, attempts = 3) {
 
 async function runTest() {
   console.log(`🧪 Starting automated pagination and lazy-loading validation test against ${origin}...`);
+  if (!testToken) {
+    console.log('⏭️ Skipped: set TEST_FIREBASE_ID_TOKEN to run authenticated live pagination checks.');
+    return;
+  }
 
   try {
     // 1. Test /api/transactions/recent as the baseline server endpoint

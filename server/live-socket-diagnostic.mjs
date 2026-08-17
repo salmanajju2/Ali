@@ -1,11 +1,17 @@
 import { io } from 'socket.io-client';
 
 const origin = process.env.ALI_API_ORIGIN || 'https://ali-ltyt.onrender.com';
+const testToken = process.env.TEST_FIREBASE_ID_TOKEN || '';
+if (!testToken) {
+  console.log('⏭️ Skipped: set TEST_FIREBASE_ID_TOKEN to run authenticated live Socket.IO checks.');
+  process.exit(0);
+}
 const testId = `non-mutating-sync-check-${Date.now()}`;
 const socket = io(origin, {
   transports: ['websocket', 'polling'],
   timeout: 20_000,
   reconnection: false,
+  auth: { token: testToken },
 });
 
 const fail = (message) => {

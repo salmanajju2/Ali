@@ -1,7 +1,16 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import {
+  createUserWithEmailAndPassword,
+  onIdTokenChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  updateProfile,
+  type User as FirebaseUser,
+} from 'firebase/auth';
 import { API_ORIGIN } from '../services/apiConfig';
+import { firebaseAuth } from '../services/firebase';
 
-const SESSION_STORAGE_KEY = 'ali_enterprises_session_token';
+const TOKEN_STORAGE_KEY = 'ali_enterprises_firebase_id_token';
 
 export interface User {
   uid: string;
@@ -20,43 +29,78 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const storeToken = (token: string | null) => {
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // Firebase remains the source of truth if browser storage is unavailable.
+  }
+};
+
 export const getSessionToken = (): string | null => {
   if (typeof window === 'undefined') return null;
   try {
-    return window.localStorage.getItem(SESSION_STORAGE_KEY);
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY);
   } catch {
     return null;
   }
 };
 
-const setSessionToken = (token: string | null) => {
-  if (typeof window === 'undefined') return;
-  try {
-    if (token) window.localStorage.setItem(SESSION_STORAGE_KEY, token);
-    else window.localStorage.removeItem(SESSION_STORAGE_KEY);
-  } catch {
-    // Storage may be unavailable in private WebView modes; the in-memory user
-    // state still protects the current session until the page is reloaded.
+export const refreshSessionToken = async (): Promise<string | null> => {
+  const firebaseUser = firebaseAuth.currentUser;
+  if (!firebaseUser) {
+    storeToken(null);
+    return null;
   }
+  const token = await firebaseUser.getIdToken();
+  storeToken(token);
+  return token;
 };
 
-const authHeaders = (): HeadersInit => {
-  const token = getSessionToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+const mapFirebaseError = (error: any): Error => {
+  const code = String(error?.code || '');
+  const messages: Record<string, string> = {
+    'auth/user-not-found': 'Yeh email registered nahi hai.',
+    'auth/wrong-password': 'Password galat hai.',
+    'auth/invalid-credential': 'Email ya password galat hai.',
+    'auth/invalid-email': 'Email address sahi nahi hai.',
+    'auth/email-already-in-use': 'Is email par account pehle se registered hai.',
+    'auth/weak-password': 'Password kam az kam 6 characters ka hona chahiye.',
+    'auth/too-many-requests': 'Bahut zyada attempts. Thodi der baad try karein.',
+    'auth/network-request-failed': 'Network error. Internet check karein.',
+  };
+  return new Error(messages[code] || error?.message || 'Login failed. Please try again.');
 };
 
-const parseAuthResponse = async (response: Response) => {
+const parseApiUser = async (response: Response): Promise<User> => {
   let payload: any = null;
   try {
     payload = await response.json();
   } catch {
-    // Keep the generic status error below for non-JSON responses.
+    // Keep the status-based error below.
   }
-  if (!response.ok) {
-    throw new Error(payload?.error || `Authentication request failed (${response.status}).`);
+  if (!response.ok || !payload?.user) {
+    throw new Error(payload?.error || `Authentication service failed (${response.status}).`);
   }
-  if (!payload?.user) throw new Error('Authentication response was incomplete.');
-  return payload;
+  return payload.user as User;
+};
+
+const hydrateBackendUser = async (firebaseUser: FirebaseUser): Promise<User> => {
+  const token = await refreshSessionToken();
+  if (!token) throw new Error('Firebase session token was not available.');
+  const response = await fetch(`${API_ORIGIN}/api/auth/me`, {
+    headers: { Authorization: `Bearer ${token}` },
+    credentials: 'omit',
+  });
+  const user = await parseApiUser(response);
+  return {
+    uid: firebaseUser.uid,
+    email: firebaseUser.email,
+    displayName: firebaseUser.displayName || user.displayName,
+    isAdmin: Boolean(user.isAdmin),
+  };
 };
 
 export const useAuth = () => {
@@ -70,61 +114,55 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = getSessionToken();
-    if (!token) {
-      setLoading(false);
-      return;
-    }
-
-    fetch(`${API_ORIGIN}/api/auth/me`, {
-      headers: authHeaders(),
-      credentials: 'omit',
-    })
-      .then(parseAuthResponse)
-      .then(({ user }) => setCurrentUser(user))
-      .catch(() => {
-        setSessionToken(null);
+    const unsubscribe = onIdTokenChanged(firebaseAuth, async (firebaseUser) => {
+      if (!firebaseUser) {
+        storeToken(null);
         setCurrentUser(null);
-      })
-      .finally(() => setLoading(false));
+        setLoading(false);
+        return;
+      }
+      try {
+        const user = await hydrateBackendUser(firebaseUser);
+        setCurrentUser(user);
+      } catch (error) {
+        console.error('Unable to hydrate backend Firebase user:', error);
+        storeToken(null);
+        setCurrentUser(null);
+      } finally {
+        setLoading(false);
+      }
+    });
+    return unsubscribe;
   }, []);
 
   const login = async (email: string, password: string) => {
-    const response = await fetch(`${API_ORIGIN}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'omit',
-      body: JSON.stringify({ email: email.trim(), password }),
-    });
-    const payload = await parseAuthResponse(response);
-    setSessionToken(payload.token);
-    setCurrentUser(payload.user);
+    try {
+      const credential = await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
+      const user = await hydrateBackendUser(credential.user);
+      setCurrentUser(user);
+    } catch (error: any) {
+      throw mapFirebaseError(error);
+    }
   };
 
   const register = async (email: string, password: string, displayName?: string) => {
-    const response = await fetch(`${API_ORIGIN}/api/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'omit',
-      body: JSON.stringify({ email: email.trim(), password, displayName }),
-    });
-    const payload = await parseAuthResponse(response);
-    setSessionToken(payload.token);
-    setCurrentUser(payload.user);
+    try {
+      const credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
+      if (displayName?.trim()) {
+        await updateProfile(credential.user, { displayName: displayName.trim() });
+      }
+      const user = await hydrateBackendUser(credential.user);
+      setCurrentUser(user);
+    } catch (error: any) {
+      throw mapFirebaseError(error);
+    }
   };
 
   const logout = async () => {
-    const token = getSessionToken();
     try {
-      if (token) {
-        await fetch(`${API_ORIGIN}/api/auth/logout`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-          credentials: 'omit',
-        });
-      }
+      await signOut(firebaseAuth);
     } finally {
-      setSessionToken(null);
+      storeToken(null);
       setCurrentUser(null);
     }
   };

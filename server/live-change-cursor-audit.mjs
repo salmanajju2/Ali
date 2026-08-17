@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 
 const origin = process.env.ALI_API_ORIGIN || 'https://ali-ltyt.onrender.com';
+const testToken = process.env.TEST_FIREBASE_ID_TOKEN || '';
+if (!testToken) {
+  console.log('⏭️ Skipped: set TEST_FIREBASE_ID_TOKEN to run authenticated live cursor checks.');
+  process.exit(0);
+}
+const authHeaders = { Authorization: `Bearer ${testToken}` };
 const allowedActions = new Set(['add', 'update', 'delete']);
 let after = 0;
 let pages = 0;
@@ -9,7 +15,7 @@ let deleteChanges = 0;
 let nullTransactionChanges = 0;
 
 while (true) {
-  const response = await fetch(`${origin}/api/transactions/changes?after=${after}&limit=1000`);
+  const response = await fetch(`${origin}/api/transactions/changes?after=${after}&limit=1000`, { headers: authHeaders });
   assert.equal(response.status, 200, `Change cursor request failed after=${after}.`);
   const page = await response.json();
   assert.ok(Array.isArray(page.changes), 'Cursor response must contain a changes array.');
