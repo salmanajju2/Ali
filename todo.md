@@ -18,4 +18,4 @@
 - [ ] Review and push current Ali Enterprises changes to GitHub.
 - [x] Review and push current Ali Enterprises changes to GitHub.
 - [x] Fix deleted transactions reappearing after manual sync and run full add/edit/delete/sync regression tests.
-- [ ] Commit and push the verified manual-sync deletion reconciliation fix to GitHub.
+- [x] Commit and push the verified manual-sync deletion reconciliation fix to GitHub.
