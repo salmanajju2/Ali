@@ -19,4 +19,6 @@
 - [x] Review and push current Ali Enterprises changes to GitHub.
 - [x] Fix deleted transactions reappearing after manual sync and run full add/edit/delete/sync regression tests.
 - [x] Commit and push the verified manual-sync deletion reconciliation fix to GitHub.
-- [ ] Automate Forward Day: calculate the combined cash net balance across all locations, then create duplicate-safe KXU entries with note "KXU location FORWARD" at 11:59 PM IST and 12:01 AM IST.
+- [x] Cancel automatic Forward Day scheduling and remove its server routes/helpers while preserving manual Forward Day and historical transaction data.
+- [x] Diagnose and fix missing or delayed web-to-APK and APK-to-web real-time transaction synchronization, then rebuild the APK.
+- [x] Fix incorrect closing balance when cash transactions are displayed, including cache and sync reconciliation checks.

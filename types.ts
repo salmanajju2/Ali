@@ -24,6 +24,7 @@ export interface Transaction {
   isSynced?: boolean; // Track if this transaction has been synced to Aiven PostgreSQL
   isSettlement?: boolean; // Track if this is an automated settlement transaction
   clientId?: string; // Stable local ID used to prevent duplicate server inserts
+  cashClosingBalance?: number; // Authoritative cumulative cash balance supplied by PostgreSQL
 }
 
 export interface CompanySummary {

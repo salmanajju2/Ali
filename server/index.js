@@ -208,27 +208,6 @@ async function ensureTransactionSchema() {
   await pool.query(`ALTER TABLE transactions ALTER COLUMN breakdown SET DEFAULT '{}'::jsonb`);
   await pool.query(`UPDATE transactions SET is_synced = TRUE WHERE is_synced IS NULL`);
 
-  // A one-row-per-business-day ledger makes the scheduled Forward Day process
-  // idempotent. The scheduler may retry a request, but this primary key prevents
-  // duplicate closing/opening pairs from being inserted for the same IST date.
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS forward_day_rollovers (
-      business_date DATE PRIMARY KEY,
-      net_amount NUMERIC NOT NULL DEFAULT 0,
-      breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
-      closing_type TEXT CHECK (closing_type IN ('credit', 'debit')),
-      opening_type TEXT CHECK (opening_type IN ('credit', 'debit')),
-      closing_transaction_id BIGINT,
-      opening_transaction_id BIGINT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      closed_at TIMESTAMPTZ,
-      opened_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS forward_day_rollovers_open_idx ON forward_day_rollovers (business_date ASC) WHERE closing_transaction_id IS NOT NULL AND opening_transaction_id IS NULL`);
-
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_users (
       id UUID PRIMARY KEY,
@@ -681,175 +660,24 @@ function transactionForRealtime(transaction) {
   return transaction;
 }
 
-const FORWARD_DAY_LOCATION = 'KXU';
-const FORWARD_DAY_NOTE = 'KXU location FORWARD';
-const FORWARD_DAY_RECORDER = 'SYSTEM AUTOMATION';
-
-function isForwardDayRequestAuthorized(req) {
-  const expected = String(process.env.FORWARD_DAY_CRON_TOKEN || '');
-  const supplied = getBearerToken(req);
-  if (!expected || !supplied) return false;
-  const expectedBuffer = Buffer.from(expected);
-  const suppliedBuffer = Buffer.from(supplied);
-  return expectedBuffer.length === suppliedBuffer.length && timingSafeEqual(expectedBuffer, suppliedBuffer);
-}
-
-function writeForwardDayTransaction(client, { businessDate, type, amount, breakdown, entry }) {
-  const date = entry === 'closing'
-    ? isoAtIst(businessDate, 23, 59)
-    : isoAtIst(addDays(businessDate, 1), 0, 1);
-  const person = entry === 'closing' ? 'Day Closing' : 'Opening Balance';
-  const clientId = `forward-day:${businessDate}:${entry}`;
-  return client.query(`
-    INSERT INTO transactions (
-      date, manual_date, amount, type, company, person, notes, payment_method,
-      location, recorded_by, bank, slip, breakdown, is_synced, is_settlement, client_id
-    ) VALUES (
-      $1, $2, $3, $4, 'NA', $5, $6, 'cash',
-      $7, $8, NULL, NULL, $9::jsonb, TRUE, FALSE, $10
-    ) RETURNING ${transactionSelectFields}
-  `, [date, businessDate, amount, type, person, FORWARD_DAY_NOTE,
-    FORWARD_DAY_LOCATION, FORWARD_DAY_RECORDER, JSON.stringify(breakdown), clientId]);
-}
-
-async function closeForwardDay() {
-  await schemaReady;
-  const businessDate = getIstBusinessDate();
-  const { start, end } = getIstDayBounds(businessDate);
-  const client = await pool.connect();
-  let transaction = null;
-
-  try {
-    await client.query('BEGIN');
-    await client.query(`
-      INSERT INTO forward_day_rollovers (business_date)
-      VALUES ($1::date)
-      ON CONFLICT (business_date) DO NOTHING
-    `, [businessDate]);
-    const rolloverResult = await client.query(
-      'SELECT * FROM forward_day_rollovers WHERE business_date=$1::date FOR UPDATE',
-      [businessDate]
-    );
-    const rollover = rolloverResult.rows[0];
-    if (rollover.closing_transaction_id) {
-      await client.query('COMMIT');
-      return { ok: true, businessDate, skipped: 'already-closed' };
-    }
-
-    const dayTransactions = await client.query(`
-      SELECT type, amount::float8 AS amount, breakdown
-      FROM transactions
-      WHERE payment_method = 'cash' AND date >= $1 AND date < $2
-    `, [start, end]);
-    const calculated = calculateForwardRollover(dayTransactions.rows);
-    if (!calculated) {
-      await client.query(`
-        UPDATE forward_day_rollovers
-        SET status='no-balance', updated_at=CURRENT_TIMESTAMP
-        WHERE business_date=$1::date
-      `, [businessDate]);
-      await client.query('COMMIT');
-      return { ok: true, businessDate, skipped: 'zero-balance' };
-    }
-
-    const insertResult = await writeForwardDayTransaction(client, {
-      businessDate,
-      type: calculated.closingType,
-      amount: calculated.amount,
-      breakdown: calculated.breakdown,
-      entry: 'closing',
-    });
-    transaction = insertResult.rows[0];
-    await client.query(`
-      UPDATE forward_day_rollovers
-      SET net_amount=$2, breakdown=$3::jsonb, closing_type=$4, opening_type=$5,
-          closing_transaction_id=$6, status='closed', closed_at=CURRENT_TIMESTAMP,
-          updated_at=CURRENT_TIMESTAMP
-      WHERE business_date=$1::date
-    `, [businessDate, calculated.netAmount, JSON.stringify(calculated.breakdown),
-      calculated.closingType, calculated.openingType, transaction.id]);
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-
-  const noteInventory = await getCashNoteInventorySnapshot();
-  publishTransactionEvent('add', { transaction: transactionForRealtime(transaction), noteInventory });
-  return { ok: true, businessDate, closingTransactionId: transaction.id };
-}
-
-async function openPendingForwardDays() {
-  await schemaReady;
-  const currentBusinessDate = getIstBusinessDate();
-  const client = await pool.connect();
-  const transactions = [];
-
-  try {
-    await client.query('BEGIN');
-    // If a prior scheduler request failed, finish every pending opening in date
-    // order. This is safer than assuming the call arrived at exactly 12:01 AM.
-    const pending = await client.query(`
-      SELECT * FROM forward_day_rollovers
-      WHERE closing_transaction_id IS NOT NULL
-        AND opening_transaction_id IS NULL
-        AND business_date < $1::date
-      ORDER BY business_date ASC
-      FOR UPDATE
-    `, [currentBusinessDate]);
-
-    for (const rollover of pending.rows) {
-      const businessDate = String(rollover.business_date).slice(0, 10);
-      const insertResult = await writeForwardDayTransaction(client, {
-        businessDate,
-        type: rollover.opening_type,
-        amount: Number(rollover.net_amount),
-        breakdown: rollover.breakdown || {},
-        entry: 'opening',
-      });
-      const transaction = insertResult.rows[0];
-      transactions.push(transaction);
-      await client.query(`
-        UPDATE forward_day_rollovers
-        SET opening_transaction_id=$2, status='complete', opened_at=CURRENT_TIMESTAMP,
-            updated_at=CURRENT_TIMESTAMP
-        WHERE business_date=$1::date
-      `, [businessDate, transaction.id]);
-    }
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-
-  if (transactions.length > 0) {
-    const noteInventory = await getCashNoteInventorySnapshot();
-    for (const transaction of transactions) {
-      publishTransactionEvent('add', { transaction: transactionForRealtime(transaction), noteInventory });
-    }
-  }
-  return { ok: true, opened: transactions.map((transaction) => transaction.id) };
-}
-
 function parseTransactionLimit(value, fallback = -1) {
   const parsed = Number.parseInt(String(value || ''), 10);
   if (!Number.isFinite(parsed) || parsed < 1) return fallback;
   return Math.min(parsed, 2_000);
 }
 
+const { cashLedgerCte } = require('./cashLedgerQuery');
+const transactionSummaryWithCashBalanceFields = `${transactionSummaryFields}, cash_closing_balance::float8 AS "cashClosingBalance"`;
+
 // Small, bounded response used by APK startup and routine reconciliation.
 // The newest records have the largest IDs because PostgreSQL assigns IDs on insert.
 app.get('/api/transactions/recent', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 500, 2000);
   await withDatabase(res, async () => {
-    const result = await pool.query(`
-      SELECT ${transactionSummaryFields}
-      FROM transactions
-      ORDER BY transactions.id DESC
+    const result = await pool.query(`${cashLedgerCte}
+      SELECT ${transactionSummaryWithCashBalanceFields}
+      FROM cash_ledger
+      ORDER BY cash_ledger.id DESC
       LIMIT $1
     `, [limit]);
     res.json(result.rows);
@@ -861,8 +689,9 @@ const { buildHistoryQuery } = require('./historyQuery');
 
 app.get('/api/transactions/history', async (req, res) => {
   await withDatabase(res, async () => {
-    const query = buildHistoryQuery(req.query, transactionSummaryFields);
-    const result = await pool.query(query.text, query.values);
+    const query = buildHistoryQuery(req.query, transactionSummaryWithCashBalanceFields, 'cash_ledger');
+    const result = await pool.query(`${cashLedgerCte}
+${query.text}`, query.values);
     const rows = result.rows;
     let hasMore = false;
     if (rows.length > query.limit) {
@@ -882,9 +711,9 @@ app.get('/api/transactions/modified-since', async (req, res) => {
   const since = req.query.since ? new Date(String(req.query.since)) : new Date(0);
   const limit = Math.min(parseInt(req.query.limit) || 200, 1000);
   await withDatabase(res, async () => {
-    const result = await pool.query(`
-      SELECT ${transactionSummaryFields}, updated_at AS "updatedAt"
-      FROM transactions
+    const result = await pool.query(`${cashLedgerCte}
+      SELECT ${transactionSummaryWithCashBalanceFields}, updated_at AS "updatedAt"
+      FROM cash_ledger
       WHERE updated_at > $1
       ORDER BY updated_at ASC
       LIMIT $2
@@ -900,7 +729,7 @@ app.get('/api/transactions/changes', async (req, res) => {
   const after = Math.max(0, Number.parseInt(String(req.query.after || '0'), 10) || 0);
   const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || '500'), 10) || 500, 1), 1_000);
   await withDatabase(res, async () => {
-    const result = await pool.query(`
+    const result = await pool.query(`${cashLedgerCte}
       SELECT
         c.change_id::text AS cursor,
         c.action AS "changeAction",
@@ -913,9 +742,10 @@ app.get('/api/transactions/changes', async (req, res) => {
           WHEN t.slip LIKE 'data:%' THEN 'lazy-slip:' || t.id::text
           ELSE t.slip
         END AS slip,
-        t.breakdown, t.is_synced AS "isSynced", t.is_settlement AS "isSettlement", t.client_id AS "clientId"
+        t.breakdown, t.is_synced AS "isSynced", t.is_settlement AS "isSettlement", t.client_id AS "clientId",
+        t.cash_closing_balance::float8 AS "cashClosingBalance"
       FROM transaction_change_log c
-      LEFT JOIN transactions t ON t.id = c.transaction_id
+      LEFT JOIN cash_ledger t ON t.id = c.transaction_id
       WHERE c.change_id > $1
       ORDER BY c.change_id ASC
       LIMIT $2
@@ -943,6 +773,7 @@ app.get('/api/transactions/changes', async (req, res) => {
         isSynced: row.isSynced,
         isSettlement: row.isSettlement,
         clientId: row.clientId,
+        cashClosingBalance: row.cashClosingBalance,
       } : null,
     }));
     const lastCursor = changes.length > 0 ? changes[changes.length - 1].cursor : String(after);
@@ -964,12 +795,12 @@ app.get('/api/transactions', async (req, res) => {
     predicates.push(`id < $${values.length}`);
   }
 
-  let query = `SELECT ${transactionSummaryFields} FROM transactions`;
+  let query = `${cashLedgerCte} SELECT ${transactionSummaryWithCashBalanceFields} FROM cash_ledger`;
   if (predicates.length > 0) query += ` WHERE ${predicates.join(' AND ')}`;
   // `id` is exposed as text in the response; qualify the table column so
   // PostgreSQL orders numerically rather than sorting the response alias
   // lexicographically (for example, "36" before "3500").
-  query += ' ORDER BY transactions.id DESC';
+  query += ' ORDER BY cash_ledger.id DESC';
 
   if (limit > 0) {
     values.push(limit);

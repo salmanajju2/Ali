@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import { API_ORIGIN } from './apiConfig';
+import { getRealtimeRecoveryDelay } from './realtimeRecovery';
 
 class RealtimeSyncService {
   private socket: Socket | null = null;
@@ -7,6 +8,10 @@ class RealtimeSyncService {
   private syncCallback: ((data?: any) => Promise<void>) | null = null;
   private pollCallback: (() => Promise<void>) | null = null;
   private onStatusChange: ((connected: boolean) => void) | null = null;
+  private wakeUpServer: (() => void) | null = null;
+  private lastForegroundRecoveryAt = 0;
+  private foregroundRecoveryTimer: number | undefined;
+  private readonly FOREGROUND_RECOVERY_DEBOUNCE_MS = 1500;
 
   private getSocketUrl() {
     // In a native APK the frontend runs under a local WebView origin. The
@@ -42,6 +47,64 @@ class RealtimeSyncService {
     callback(this.isSocketConnected());
   }
 
+  /**
+   * Android WebView can report a connected socket briefly after a network or
+   * background transition even when it missed a broadcast. Probe the connection
+   * and run one authoritative refresh. Rapid transitions keep a trailing refresh
+   * instead of dropping it entirely.
+   */
+  private requestForegroundRecovery(reason: string) {
+    const delay = getRealtimeRecoveryDelay(
+      Date.now(),
+      this.lastForegroundRecoveryAt,
+      this.FOREGROUND_RECOVERY_DEBOUNCE_MS,
+    );
+
+    if (this.foregroundRecoveryTimer !== undefined) {
+      window.clearTimeout(this.foregroundRecoveryTimer);
+      this.foregroundRecoveryTimer = undefined;
+    }
+
+    if (delay === 0) {
+      this.performForegroundRecovery(reason);
+      return;
+    }
+
+    this.foregroundRecoveryTimer = window.setTimeout(() => {
+      this.foregroundRecoveryTimer = undefined;
+      this.performForegroundRecovery(reason);
+    }, delay);
+  }
+
+  private performForegroundRecovery(reason: string) {
+    this.lastForegroundRecoveryAt = Date.now();
+    this.wakeUpServer?.();
+
+    const socket = this.socket;
+    if (!socket) {
+      this.isInitialized = false;
+      void this.init();
+      return;
+    }
+
+    if (!socket.connected) {
+      socket.connect();
+      return;
+    }
+
+    socket.timeout(5000).emit(
+      'sync-status',
+      (error: Error | null, status?: { connected?: boolean }) => {
+        if (error || !status?.connected) {
+          console.warn(`Realtime health probe failed after ${reason}; reconnecting Socket.IO.`);
+          socket.disconnect().connect();
+          return;
+        }
+        void this.pollCallback?.();
+      },
+    );
+  }
+
   private async init() {
     if (this.isInitialized) return;
 
@@ -75,12 +138,17 @@ class RealtimeSyncService {
     const wakeUpServer = () => {
       fetch(socketUrl, { method: 'GET', mode: 'no-cors' }).catch(() => { /* ignore */ });
     };
+    this.wakeUpServer = wakeUpServer;
 
-    // Wake up server on initial init and window focus / touch
+    // Wake up and validate the connection when a browser tab or Android WebView
+    // becomes active again. This closes the missed-event gap after backgrounding.
     wakeUpServer();
     if (typeof window !== 'undefined') {
-      window.addEventListener('focus', wakeUpServer, { passive: true });
-      window.addEventListener('touchstart', wakeUpServer, { once: true, passive: true });
+      window.addEventListener('focus', () => this.requestForegroundRecovery('window-focus'), { passive: true });
+      window.addEventListener('online', () => this.requestForegroundRecovery('network-online'), { passive: true });
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) this.requestForegroundRecovery('visibility-visible');
+      });
     }
 
     this.socket.on('connect', () => {
@@ -118,29 +186,14 @@ class RealtimeSyncService {
     this.isInitialized = true;
   }
 
-  private lastPollTime = 0;
-  private readonly POLL_DEBOUNCE_MS = 1500; // fast foreground refresh without repeated storms
-
   private registerCapacitorLifecycle() {
     setTimeout(() => {
       try {
         import('@capacitor/app').then((mod) => {
           mod.App.addListener('appStateChange', (state: { isActive: boolean }) => {
             if (state.isActive) {
-              const now = Date.now();
-              if (now - this.lastPollTime < this.POLL_DEBOUNCE_MS) {
-                console.log('App foregrounded. Socket reconnect only (poll debounced).');
-                if (this.socket && !this.socket.connected) {
-                  this.socket.connect();
-                }
-                return;
-              }
-              this.lastPollTime = now;
-              console.log('App foregrounded. Reconnecting socket and refreshing data.');
-              if (this.socket && !this.socket.connected) {
-                this.socket.connect();
-              }
-              void this.pollCallback?.();
+              console.log('App foregrounded. Validating Socket.IO and refreshing authoritative data.');
+              this.requestForegroundRecovery('app-foreground');
             }
           });
           console.log('Capacitor App lifecycle listener registered.');

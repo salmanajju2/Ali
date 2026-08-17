@@ -214,7 +214,6 @@ const HistoryPage: React.FC = () => {
 
     const validTxs = transactions.filter(tx => {
       if (tx.paymentMethod !== 'cash') return false;
-      if (!tx.breakdown || Object.keys(tx.breakdown).length === 0) return false;
 
       // Admin sab dekhe
       if (isAdmin) return true;
@@ -240,7 +239,12 @@ const HistoryPage: React.FC = () => {
     const txsWithBalance = [];
     for (let i = 0; i < validTxs.length; i++) {
       const tx = validTxs[i];
-      currentBalance += (tx.type === 'credit' ? tx.amount : -tx.amount);
+      const authoritativeBalance = Number(tx.cashClosingBalance);
+      if (Number.isFinite(authoritativeBalance)) {
+        currentBalance = authoritativeBalance;
+      } else {
+        currentBalance += (tx.type === 'credit' ? tx.amount : -tx.amount);
+      }
       txsWithBalance.unshift({ ...tx, closingBalance: currentBalance });
     }
     return txsWithBalance;

@@ -17,7 +17,7 @@ function nextHistoryDate(dateOnly) {
   return date.toISOString();
 }
 
-function buildHistoryQuery(queryParams, selectFields) {
+function buildHistoryQuery(queryParams, selectFields, sourceRelation = 'transactions') {
   const limit = parseHistoryLimit(queryParams.limit, 50);
   const beforeId = Number.parseInt(String(queryParams.beforeId || ''), 10);
   const values = [];
@@ -72,9 +72,9 @@ function buildHistoryQuery(queryParams, selectFields) {
     values,
     text: `
       SELECT ${selectFields}
-      FROM transactions
+      FROM ${sourceRelation}
       ${predicates.length > 0 ? `WHERE ${predicates.join(' AND ')}` : ''}
-      ORDER BY transactions.id DESC
+      ORDER BY ${sourceRelation}.id DESC
       LIMIT $${values.length}
     `,
   };
