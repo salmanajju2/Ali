@@ -680,6 +680,27 @@ app.get('/api/transactions/recent', async (req, res) => {
   });
 });
 
+// Server-side paginated & filtered history endpoint using historyQuery helper
+const { buildHistoryQuery } = require('./historyQuery');
+
+app.get('/api/transactions/history', async (req, res) => {
+  await withDatabase(res, async () => {
+    const query = buildHistoryQuery(req.query, transactionSummaryFields);
+    const result = await pool.query(query.text, query.values);
+    const rows = result.rows;
+    let hasMore = false;
+    if (rows.length > query.limit) {
+      rows.pop();
+      hasMore = true;
+    }
+    res.json({
+      transactions: rows,
+      hasMore,
+      nextBeforeId: rows.length > 0 ? rows[rows.length - 1].id : null,
+    });
+  });
+});
+
 // Endpoint to fetch transactions modified since a given timestamp (for direct SQL edits)
 app.get('/api/transactions/modified-since', async (req, res) => {
   const since = req.query.since ? new Date(String(req.query.since)) : new Date(0);

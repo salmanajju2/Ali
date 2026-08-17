@@ -102,6 +102,39 @@ export class AivenDatabaseService {
     }
   }
 
+  async getTransactionHistory(params: {
+    limit?: number;
+    beforeId?: string | number;
+    company?: string;
+    location?: string;
+    type?: string;
+    recordedBy?: string;
+    paymentMethod?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    search?: string;
+  } = {}): Promise<{ transactions: any[]; hasMore: boolean; nextBeforeId: string | null }> {
+    try {
+      const searchParams = new URLSearchParams();
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== '' && value !== 'all') {
+          searchParams.set(key, String(value));
+        }
+      });
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/api/transactions/history?${searchParams.toString()}`);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      return {
+        transactions: Array.isArray(data.transactions) ? data.transactions : [],
+        hasMore: Boolean(data.hasMore),
+        nextBeforeId: data.nextBeforeId ? String(data.nextBeforeId) : null,
+      };
+    } catch (error) {
+      console.error('Error fetching paginated transaction history:', error);
+      return { transactions: [], hasMore: false, nextBeforeId: null };
+    }
+  }
+
   async getTransactionsModifiedSince(sinceIsoString: string): Promise<any[]> {
     try {
       const query = sinceIsoString ? `?since=${encodeURIComponent(sinceIsoString)}` : '';
