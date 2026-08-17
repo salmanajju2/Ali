@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyRecorderScopedCashBalances } from './historyBalance.js';
+import { applyRecorderScopedCashBalances, isMainCashHistoryTransaction } from './historyBalance.js';
+
+test('Main Cash History excludes company-associated cash debits but keeps standalone cash rows', () => {
+  assert.equal(isMainCashHistoryTransaction({ paymentMethod: 'cash', type: 'debit', company: 'SATIN' }), false);
+  assert.equal(isMainCashHistoryTransaction({ paymentMethod: 'cash', type: 'debit', company: 'N/A' }), true);
+  assert.equal(isMainCashHistoryTransaction({ paymentMethod: 'cash', type: 'credit', company: 'SATIN' }), true);
+  assert.equal(isMainCashHistoryTransaction({ paymentMethod: 'upi', type: 'debit', company: 'SATIN' }), false);
+});
 
 test('History cash balances remain recorder-scoped and ignore the aggregate server balance', () => {
   const transactions = [

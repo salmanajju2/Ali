@@ -16,7 +16,7 @@ import TotalVaultDetails from '../components/TotalVaultDetails';
 import { sendTelegramPhoto } from '../services/telegramService';
 import SlipImage from '../components/SlipImage';
 import { aivenDatabase } from '../services/AivenDatabaseService';
-import { applyRecorderScopedCashBalances } from '../services/historyBalance';
+import { applyRecorderScopedCashBalances, isMainCashHistoryTransaction } from '../services/historyBalance';
 
 const TRANSACTIONS_PER_PAGE = 50;
 
@@ -214,7 +214,7 @@ const HistoryPage: React.FC = () => {
     const userEmailPrefix = userEmail.split('@')[0];
 
     const validTxs = transactions.filter(tx => {
-      if (tx.paymentMethod !== 'cash') return false;
+      if (!isMainCashHistoryTransaction(tx)) return false;
 
       // Admin sab dekhe
       if (isAdmin) return true;

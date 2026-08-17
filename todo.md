@@ -25,3 +25,5 @@
 - [x] Diagnose and fix APK sync failures, missing web-to-APK data, and deleted transaction resurrection with full cross-device regression coverage.
 - [x] Replace combined all-user History card balances with person/account-specific running cash balances while retaining page-level filtered totals.
 - [x] Verify and push the latest verified Ali Enterprises source state to GitHub main.
+- [x] Make each History card closing balance match the current user's actual Vault cash balance scope instead of showing an incorrect historical aggregate.
+- [x] Exclude company-associated cash debit entries from Main Cash History and retain them only in Company History.
