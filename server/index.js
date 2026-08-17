@@ -5,13 +5,7 @@ const cors = require('cors');
 const path = require('path');
 const { Pool } = require('pg');
 const { randomBytes, randomUUID, scryptSync, timingSafeEqual } = require('crypto');
-const {
-  addDays,
-  calculateForwardRollover,
-  getIstBusinessDate,
-  getIstDayBounds,
-  isoAtIst,
-} = require('./forwardDayRollover');
+
 
 const app = express();
 
@@ -1092,38 +1086,7 @@ app.delete('/api/transactions/:id', async (req, res) => {
   });
 });
 
-// The external daily scheduler invokes these two protected endpoints. They do
-// not rely on a browser/APK being open, and the database rollover ledger makes
-// every retry safe.
-app.post('/api/scheduled/forward-day-close', async (req, res) => {
-  if (!process.env.FORWARD_DAY_CRON_TOKEN) {
-    return res.status(503).json({ error: 'FORWARD_DAY_CRON_TOKEN is not configured.' });
-  }
-  if (!isForwardDayRequestAuthorized(req)) {
-    return res.status(401).json({ error: 'Unauthorized scheduled Forward Day request.' });
-  }
-  try {
-    res.json(await closeForwardDay());
-  } catch (error) {
-    console.error('Scheduled Forward Day close failed:', error);
-    res.status(500).json({ error: 'Forward Day close failed.', detail: error.message });
-  }
-});
 
-app.post('/api/scheduled/forward-day-open', async (req, res) => {
-  if (!process.env.FORWARD_DAY_CRON_TOKEN) {
-    return res.status(503).json({ error: 'FORWARD_DAY_CRON_TOKEN is not configured.' });
-  }
-  if (!isForwardDayRequestAuthorized(req)) {
-    return res.status(401).json({ error: 'Unauthorized scheduled Forward Day request.' });
-  }
-  try {
-    res.json(await openPendingForwardDays());
-  } catch (error) {
-    console.error('Scheduled Forward Day open failed:', error);
-    res.status(500).json({ error: 'Forward Day open failed.', detail: error.message });
-  }
-});
 
 // 5. Proxy & Utility Endpoints
 app.post('/telegram/sendMessage', async (req, res) => {
