@@ -2,7 +2,7 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ci --ignore-scripts
 COPY . .
 RUN npm run build
 
@@ -13,7 +13,7 @@ WORKDIR /app
 # Copy server package files and install production dependencies
 COPY server/package*.json ./server/
 WORKDIR /app/server
-RUN npm install --production
+RUN npm ci --omit=dev --ignore-scripts
 
 # Copy server code from root/server
 WORKDIR /app

@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import { API_ORIGIN } from './apiConfig';
+import { getSessionToken } from '../context/AuthContext';
 
 class RealtimeSyncService {
   private socket: Socket | null = null;
@@ -26,6 +27,8 @@ class RealtimeSyncService {
     // connect event pehle fire ho gaya, toh initial server refresh miss nahi hona chahiye.
     if (this.socket?.connected) {
       void this.syncCallback({ action: 'sync', reason: 'callback-registered' });
+    } else if (getSessionToken()) {
+      this.socket?.connect();
     }
   }
 
@@ -62,6 +65,9 @@ class RealtimeSyncService {
       // proxy/network blocks it, Socket.IO automatically falls back to polling.
       transports: ['websocket', 'polling'],
       autoConnect: true,
+      auth: (callback: (auth: { token: string | null }) => void) => {
+        callback({ token: getSessionToken() });
+      },
       withCredentials: false,
       forceNew: true,
       perMessageDeflate: false as any,

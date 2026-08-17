@@ -94,7 +94,7 @@ const getUserIdentityKeys = (user: User | null): Set<string> => {
 };
 
 const isAdminUser = (user: User | null): boolean => {
-  return Boolean(user?.isAdmin || normalizeIdentity(user?.email) === 'alienterprese@gmail.com');
+  return Boolean(user?.isAdmin);
 };
 
 const isTransactionVisibleToUser = (tx: Transaction, user: User | null, identityKeys: Set<string>): boolean => {

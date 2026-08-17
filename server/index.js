@@ -4,17 +4,37 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
 const { Pool } = require('pg');
-const { randomBytes, randomUUID, scryptSync, timingSafeEqual } = require('crypto');
+const { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } = require('crypto');
 
 const app = express();
 
 // 1. Middleware FIRST
-app.use(cors({
-  origin: true,
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
-}));
+const allowedOrigins = new Set(
+  (process.env.ALLOWED_ORIGINS || 'https://ali-ltyt.onrender.com,http://localhost:5173,http://localhost:4173,capacitor://localhost,http://localhost')
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(Boolean)
+);
+
+const adminEmails = new Set(
+  (process.env.ADMIN_EMAILS || '')
+    .split(',')
+    .map(email => email.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Native WebViews and same-origin server calls may omit Origin.
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error('Origin is not allowed by CORS'));
+  },
+  credentials: false,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+};
+
+app.use(cors(corsOptions));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -66,6 +86,35 @@ function verifyPassword(password, storedValue) {
 function getBearerToken(req) {
   const header = String(req.headers.authorization || '');
   return header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+}
+
+function hashSessionToken(token) {
+  return createHash('sha256').update(String(token)).digest('hex');
+}
+
+async function findSessionUser(token) {
+  if (!token) return null;
+  const result = await pool.query(
+    `SELECT u.id, u.email, u.display_name, u.is_admin
+     FROM app_sessions s
+     INNER JOIN app_users u ON u.id = s.user_id
+     WHERE s.token_hash = $1 AND s.expires_at > NOW()`,
+    [hashSessionToken(token)]
+  );
+  return result.rows[0] || null;
+}
+
+async function requireAuth(req, res, next) {
+  try {
+    await schemaReady;
+    const user = await findSessionUser(getBearerToken(req));
+    if (!user) return res.status(401).json({ error: 'Sign-in required.' });
+    req.authUser = user;
+    return next();
+  } catch (error) {
+    console.error('Authentication lookup failed:', error);
+    return res.status(503).json({ error: 'Authentication service temporarily unavailable.' });
+  }
 }
 
 function createPublicUser(row) {
@@ -467,18 +516,24 @@ app.post('/api/auth/register', async (req, res) => {
   }
   await withDatabase(res, async () => {
     const id = randomUUID();
-    const isAdmin = email === 'alienterprese@gmail.com';
-    const result = await pool.query(
-      `INSERT INTO app_users (id, email, password_hash, display_name, is_admin)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, email, display_name, is_admin`,
-      [id, email, hashPassword(password), displayName, isAdmin]
-    );
+    const isAdmin = adminEmails.has(email);
+    let result;
+    try {
+      result = await pool.query(
+        `INSERT INTO app_users (id, email, password_hash, display_name, is_admin)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, email, display_name, is_admin`,
+        [id, email, hashPassword(password), displayName, isAdmin]
+      );
+    } catch (error) {
+      if (error?.code === '23505') return res.status(409).json({ error: 'This email already has an account.' });
+      throw error;
+    }
     const token = randomBytes(32).toString('hex');
     await pool.query(
       `INSERT INTO app_sessions (token_hash, user_id, expires_at)
        VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-      [token, id]
+      [hashSessionToken(token), id,]
     );
     res.status(201).json({ user: createPublicUser(result.rows[0]), token });
   });
@@ -500,7 +555,7 @@ app.post('/api/auth/login', async (req, res) => {
     await pool.query(
       `INSERT INTO app_sessions (token_hash, user_id, expires_at)
        VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-      [token, user.id]
+      [hashSessionToken(token), user.id]
     );
     res.json({ user: createPublicUser(user), token });
   });
@@ -515,7 +570,7 @@ app.get('/api/auth/me', async (req, res) => {
        FROM app_sessions s
        INNER JOIN app_users u ON u.id=s.user_id
        WHERE s.token_hash=$1 AND s.expires_at > NOW()`,
-      [token]
+      [hashSessionToken(token)]
     );
     if (result.rowCount === 0) return res.status(401).json({ error: 'Session expired. Please sign in again.' });
     res.json({ user: createPublicUser(result.rows[0]) });
@@ -526,13 +581,20 @@ app.post('/api/auth/logout', async (req, res) => {
   const token = getBearerToken(req);
   if (token) {
     await withDatabase(res, async () => {
-      await pool.query('DELETE FROM app_sessions WHERE token_hash=$1', [token]);
+      await pool.query('DELETE FROM app_sessions WHERE token_hash=$1', [hashSessionToken(token)]);
       res.json({ ok: true });
     });
     return;
   }
   res.json({ ok: true });
 });
+
+// All business data and integration proxies require a valid backend session.
+// Authentication is enforced here rather than in the client so it cannot be bypassed.
+app.use('/api/transactions', requireAuth);
+app.use('/api/cash-note-inventory', requireAuth);
+app.use('/telegram', requireAuth);
+app.use('/discord', requireAuth);
 
 // 5. REST API for Transactions (Aiven PostgreSQL)
 async function getCashNoteInventorySnapshot() {
@@ -912,7 +974,11 @@ app.delete('/api/transactions/:id', async (req, res) => {
 
 // 5. Proxy & Utility Endpoints
 app.post('/telegram/sendMessage', async (req, res) => {
-  const { botToken, chatId, message } = req.body;
+  const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.PHOTO_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID || process.env.PHOTO_CHAT_ID;
+  const message = String(req.body?.message || '').trim();
+  if (!botToken || !chatId) return res.status(503).json({ error: 'Telegram integration is not configured on the server.' });
+  if (!message || message.length > 4_000) return res.status(400).json({ error: 'Message must contain 1-4000 characters.' });
   try {
     const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
@@ -932,9 +998,14 @@ app.post('/telegram/sendMessage', async (req, res) => {
 });
 
 app.post('/telegram/sendPhoto', async (req, res) => {
-  const { botToken, chatId, base64Photo } = req.body;
+  const botToken = process.env.PHOTO_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.PHOTO_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+  const base64Photo = String(req.body?.base64Photo || '');
+  if (!botToken || !chatId) return res.status(503).json({ error: 'Telegram photo integration is not configured on the server.' });
+  if (!base64Photo || base64Photo.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'Photo payload is missing or too large.' });
   try {
     const base64Parts = base64Photo.split(',');
+    if (base64Parts.length !== 2) return res.status(400).json({ error: 'Invalid base64 photo payload.' });
     const mime = base64Parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
     const bstr = atob(base64Parts[1]);
     let n = bstr.length;
@@ -959,34 +1030,67 @@ app.post('/telegram/sendPhoto', async (req, res) => {
 });
 
 app.get('/telegram/getFileUrl', async (req, res) => {
-  const { botToken, fileId } = req.query;
+  const fileId = String(req.query.fileId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,256}$/.test(fileId)) return res.status(400).json({ error: 'A valid Telegram fileId is required.' });
+  const tokens = [process.env.PHOTO_BOT_TOKEN, process.env.TELEGRAM_BOT_TOKEN].filter(Boolean);
+  if (tokens.length === 0) return res.status(503).json({ error: 'Telegram integration is not configured on the server.' });
   try {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
-    const data = await response.json();
-    if (data.ok) {
-      const filePath = data.result.file_path;
-      res.json({ url: `https://api.telegram.org/file/bot${botToken}/${filePath}` });
-    } else {
-      res.status(404).json({ error: 'File not found on Telegram' });
+    for (const botToken of tokens) {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`);
+      const data = await response.json();
+      if (data.ok && data.result?.file_path) {
+        return res.json({ proxyUrl: `/telegram/fetchFile?fileId=${encodeURIComponent(fileId)}` });
+      }
     }
+    return res.status(404).json({ error: 'File not found on Telegram' });
   } catch (error) {
     console.error('Error in proxy getFileUrl:', error);
-    res.status(500).json({ error: error.message });
+    return res.status(502).json({ error: 'Unable to resolve Telegram file.' });
   }
 });
 
 app.get('/telegram/fetchFile', async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: 'url param required' });
+  const requestedUrl = String(req.query.url || '');
+  const fileId = String(req.query.fileId || '').trim();
+  const tokens = [process.env.PHOTO_BOT_TOKEN, process.env.TELEGRAM_BOT_TOKEN].filter(Boolean);
+  let upstreamUrl = '';
 
   try {
-    const telegramRes = await fetch(decodeURIComponent(url));
+    if (fileId) {
+      if (!/^[A-Za-z0-9_-]{1,256}$/.test(fileId) || tokens.length === 0) {
+        return res.status(400).json({ error: 'Invalid Telegram file request.' });
+      }
+      for (const botToken of tokens) {
+        const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`);
+        const fileData = await fileResponse.json();
+        if (fileData.ok && fileData.result?.file_path) {
+          upstreamUrl = `https://api.telegram.org/file/bot${botToken}/${fileData.result.file_path}`;
+          break;
+        }
+      }
+    } else if (requestedUrl) {
+      const parsed = new URL(decodeURIComponent(requestedUrl));
+      const allowedHosts = new Set(['api.telegram.org', 'cdn.discordapp.com', 'media.discordapp.net']);
+      if (parsed.protocol !== 'https:' || !allowedHosts.has(parsed.hostname)) {
+        return res.status(400).json({ error: 'Upstream file host is not allowed.' });
+      }
+      upstreamUrl = parsed.toString();
+    }
+
+    if (!upstreamUrl) return res.status(404).json({ error: 'File was not found.' });
+    const telegramRes = await fetch(upstreamUrl);
     if (!telegramRes.ok) {
       return res.status(telegramRes.status).json({ error: 'Failed to fetch from Telegram' });
     }
 
-    const contentType = telegramRes.headers.get('content-type') || 'application/pdf';
+    const declaredLength = Number(telegramRes.headers.get('content-length') || 0);
+    if (declaredLength > 15 * 1024 * 1024) return res.status(413).json({ error: 'File is too large.' });
+    const contentType = telegramRes.headers.get('content-type') || 'application/octet-stream';
+    if (!/^(image\/(jpeg|png|webp|gif)|application\/pdf)$/.test(contentType.split(';')[0].trim())) {
+      return res.status(415).json({ error: 'Unsupported file type.' });
+    }
     const buffer = await telegramRes.arrayBuffer();
+    if (buffer.byteLength > 15 * 1024 * 1024) return res.status(413).json({ error: 'File is too large.' });
 
     res.set({
       'Content-Type': contentType,
@@ -1003,19 +1107,25 @@ app.get('/telegram/fetchFile', async (req, res) => {
 
 // Discord Upload Proxy
 app.post('/discord/upload', async (req, res) => {
-  const { base64Data, fileName } = req.body;
+  const base64Data = String(req.body?.base64Data || '');
+  const rawFileName = String(req.body?.fileName || 'slip.jpg');
+  const fileName = rawFileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'slip.jpg';
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
   if (!webhookUrl) return res.status(503).json({ error: 'DISCORD_WEBHOOK_URL is not configured on the server.' });
+  if (!base64Data || base64Data.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'Upload is missing or too large.' });
   
   try {
     const base64Parts = base64Data.split(',');
+    if (base64Parts.length !== 2) return res.status(400).json({ error: 'Invalid base64 upload payload.' });
     const mime = base64Parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
+    if (!/^(image\/(jpeg|png|webp)|application\/pdf)$/.test(mime)) return res.status(415).json({ error: 'Only JPG, PNG, WebP, and PDF files are supported.' });
     const base64Content = base64Parts[1];
     
     const buffer = Buffer.from(base64Content, 'base64');
+    if (buffer.length > 15 * 1024 * 1024) return res.status(413).json({ error: 'Upload is too large.' });
     const formData = new FormData();
     const blob = new Blob([buffer], { type: mime });
-    formData.append('files[0]', blob, fileName || 'slip.jpg');
+    formData.append('files[0]', blob, fileName);
     
     const response = await fetch(`${webhookUrl}?wait=true`, {
       method: 'POST',
@@ -1036,6 +1146,26 @@ app.post('/discord/upload', async (req, res) => {
   } catch (error) {
     console.error('Error in proxy /discord/upload:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/telegram/deleteMessage', async (req, res) => {
+  const botToken = process.env.PHOTO_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.PHOTO_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+  const messageId = Number(req.body?.messageId);
+  if (!botToken || !chatId) return res.status(503).json({ error: 'Telegram integration is not configured on the server.' });
+  if (!Number.isInteger(messageId) || messageId < 1) return res.status(400).json({ error: 'A valid Telegram messageId is required.' });
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/deleteMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    });
+    const data = await response.json();
+    return res.status(response.ok ? 200 : response.status).json(data);
+  } catch (error) {
+    console.error('Error in proxy deleteMessage:', error);
+    return res.status(502).json({ error: 'Unable to delete Telegram message.' });
   }
 });
 
@@ -1065,6 +1195,7 @@ app.delete('/discord/deleteMessage/:messageId', async (req, res) => {
   const { messageId } = req.params;
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
   if (!webhookUrl) return res.status(503).json({ error: 'DISCORD_WEBHOOK_URL is not configured on the server.' });
+  if (!/^\d{17,20}$/.test(messageId)) return res.status(400).json({ error: 'A valid Discord messageId is required.' });
   
   try {
     const cleanWebhookUrl = webhookUrl.split('?')[0].replace(/\/$/, '');
@@ -1087,17 +1218,30 @@ app.delete('/discord/deleteMessage/:messageId', async (req, res) => {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: true,
-    methods: ["GET", "POST"],
-    credentials: true,
-    allowedHeaders: ["*"]
+    origin: [...allowedOrigins],
+    methods: ['GET', 'POST'],
+    credentials: false,
+    allowedHeaders: ['Content-Type', 'Authorization'],
   },
-  allowEIO3: true,
+  allowEIO3: false,
   pingTimeout: 20000,
   pingInterval: 10000,
   transports: ['websocket', 'polling'],
   upgrade: true,
-  rememberUpgrade: true
+  rememberUpgrade: true,
+});
+
+io.use(async (socket, next) => {
+  try {
+    await schemaReady;
+    const user = await findSessionUser(socket.handshake.auth?.token);
+    if (!user) return next(new Error('Sign-in required.'));
+    socket.data.user = user;
+    return next();
+  } catch (error) {
+    console.error('Socket authentication failed:', error);
+    return next(new Error('Authentication service unavailable.'));
+  }
 });
 
 io.on('connection', (socket) => {

@@ -1,14 +1,16 @@
 // Native APKs are served from a local WebView origin, so proxy calls must use
 // the public Render backend instead of window.location.origin.
 import { API_ORIGIN } from './apiConfig';
+import { getSessionToken } from '../context/AuthContext';
 
 const PROXY_SERVER = API_ORIGIN;
 
-
-export const BOT_TOKEN = import.meta.env.VITE_TELEGRAM_BOT_TOKEN || '';
-export const CHAT_ID = import.meta.env.VITE_TELEGRAM_CHAT_ID || '';
-export const PHOTO_BOT_TOKEN = import.meta.env.VITE_PHOTO_BOT_TOKEN || BOT_TOKEN;
-export const PHOTO_CHAT_ID = import.meta.env.VITE_PHOTO_CHAT_ID || CHAT_ID;
+const proxyFetch = (url: string, init: RequestInit = {}) => {
+  const headers = new Headers(init.headers);
+  const token = getSessionToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return fetch(url, { ...init, headers, credentials: 'omit' });
+};
 
 /**
  * Uploads a photo or document (PDF) to the PHOTO bot directly via Telegram API
@@ -24,7 +26,7 @@ export const sendTelegramPhoto = async (base64Data: string): Promise<string | nu
     console.log(`[Discord Upload] Target Proxy Server: ${PROXY_SERVER}`);
 
     // Call proxy server's Discord upload endpoint
-    const response = await fetch(`${PROXY_SERVER}/discord/upload`, {
+    const response = await proxyFetch(`${PROXY_SERVER}/discord/upload`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -68,7 +70,7 @@ export const getTelegramPhotoUrl = async (fileId: string): Promise<string | null
     if (isDiscordId) {
         try {
             console.log(`[Discord Fetch] Calling proxy server: ${PROXY_SERVER}/discord/getFileUrl?messageId=${fileId}`);
-            const response = await fetch(`${PROXY_SERVER}/discord/getFileUrl?messageId=${fileId}`);
+            const response = await proxyFetch(`${PROXY_SERVER}/discord/getFileUrl?messageId=${fileId}`);
             if (response.ok) {
                 const data = await response.json();
                 console.log(`[Discord Fetch] Discord file URL response:`, data);
@@ -83,25 +85,20 @@ export const getTelegramPhotoUrl = async (fileId: string): Promise<string | null
 
     console.log('[Discord Fetch] Falling back to Telegram proxy for legacy fileId:', fileId);
     // Fallback to Telegram (legacy) via proxy to bypass regional blocking in India
-    const tokens = [PHOTO_BOT_TOKEN, BOT_TOKEN];
-    
-    for (const token of tokens) {
-        if (!token) continue;
-        try {
-            const response = await fetch(`${PROXY_SERVER}/telegram/getFileUrl?botToken=${token}&fileId=${fileId}`);
-            if (response.ok) {
-                const data = await response.json();
-                if (data.url) {
-                    // Wrap the final URL in our proxy fetchFile route to stream the image/PDF
-                    // since api.telegram.org image URLs are also blocked.
-                    const proxiedUrl = `${PROXY_SERVER}/telegram/fetchFile?url=${encodeURIComponent(data.url)}`;
-                    console.log(`[Discord Fetch] Successfully resolved Telegram legacy proxied URL:`, proxiedUrl);
-                    return proxiedUrl;
-                }
+    try {
+        const response = await proxyFetch(`${PROXY_SERVER}/telegram/getFileUrl?fileId=${encodeURIComponent(fileId)}`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.proxyUrl || data.url) {
+                const proxiedUrl = data.proxyUrl?.startsWith('/')
+                  ? `${PROXY_SERVER}${data.proxyUrl}`
+                  : `${PROXY_SERVER}/telegram/fetchFile?url=${encodeURIComponent(data.url)}`;
+                console.log(`[Telegram Fetch] Successfully resolved legacy proxied URL:`, proxiedUrl);
+                return proxiedUrl;
             }
-        } catch (error) {
-            console.error('[Discord Fetch] Failed to get URL with token via proxy:', error);
         }
+    } catch (error) {
+        console.error('[Telegram Fetch] Failed to resolve legacy file via proxy:', error);
     }
     return null;
 };
@@ -111,14 +108,10 @@ export const getTelegramPhotoUrl = async (fileId: string): Promise<string | null
  */
 export const sendTelegramMessage = async (message: string) => {
   try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    await proxyFetch(`${PROXY_SERVER}/telegram/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text: message,
-        parse_mode: 'Markdown',
-      }),
+      body: JSON.stringify({ message }),
     });
   } catch (error) {
     console.error('Failed message via Telegram:', error);
@@ -138,7 +131,7 @@ export const deleteTelegramMessage = async (messageId: string | number): Promise
   if (isDiscordId) {
     try {
       console.log(`[Discord Delete] Calling proxy server delete message endpoint: ${PROXY_SERVER}/discord/deleteMessage/${messageId}`);
-      const response = await fetch(`${PROXY_SERVER}/discord/deleteMessage/${messageId}`, {
+      const response = await proxyFetch(`${PROXY_SERVER}/discord/deleteMessage/${messageId}`, {
         method: 'DELETE',
       });
       if (response.ok) {
@@ -156,15 +149,12 @@ export const deleteTelegramMessage = async (messageId: string | number): Promise
   }
 
   console.log('[Discord Delete] Falling back to Telegram delete message for ID:', messageId);
-  // Fallback to Telegram (legacy)
+  // Fallback to the authenticated Telegram proxy. Bot credentials stay server-side.
   try {
-    const response = await fetch(`https://api.telegram.org/bot${PHOTO_BOT_TOKEN}/deleteMessage`, {
+    const response = await proxyFetch(`${PROXY_SERVER}/telegram/deleteMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: PHOTO_CHAT_ID,
-        message_id: Number(messageId),
-      }),
+      body: JSON.stringify({ messageId: Number(messageId) }),
     });
     const data = await response.json();
     console.log('[Discord Delete] Telegram legacy delete response:', data);

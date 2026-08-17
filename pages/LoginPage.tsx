@@ -192,7 +192,7 @@ const LoginPage: React.FC = () => {
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   required
-                  minLength={6}
+                  minLength={8}
                   placeholder="••••••••"
                   className="w-full pl-10 pr-12 py-3 rounded-2xl text-sm outline-none transition-all"
                   style={{

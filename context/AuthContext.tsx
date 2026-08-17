@@ -1,12 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import {
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut,
-  type User as FirebaseUser,
-} from 'firebase/auth';
-import { firebaseAuth } from '../services/firebase';
+import { API_ORIGIN } from '../services/apiConfig';
+
+const SESSION_STORAGE_KEY = 'ali_enterprises_session_token';
 
 export interface User {
   uid: string;
@@ -18,45 +13,51 @@ export interface User {
 interface AuthContextType {
   currentUser: User | null;
   login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string) => Promise<void>;
+  register: (email: string, password: string, displayName?: string) => Promise<void>;
   logout: () => Promise<void>;
   loading: boolean;
 }
 
-const ADMIN_EMAILS = new Set(['alienterprese@gmail.com']);
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const toAppUser = (firebaseUser: FirebaseUser): User => ({
-  uid: firebaseUser.uid,
-  email: firebaseUser.email,
-  displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || null,
-  isAdmin: Boolean(firebaseUser.email && ADMIN_EMAILS.has(firebaseUser.email.toLowerCase())),
-});
-
-const friendlyAuthError = (error: unknown): Error => {
-  const code = typeof error === 'object' && error && 'code' in error
-    ? String((error as { code: string }).code)
-    : '';
-
-  if (code === 'auth/invalid-credential' || code === 'auth/user-not-found' || code === 'auth/wrong-password') {
-    return new Error('Invalid email or password.');
+export const getSessionToken = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(SESSION_STORAGE_KEY);
+  } catch {
+    return null;
   }
-  if (code === 'auth/too-many-requests') {
-    return new Error('Too many attempts. Please wait a few minutes and try again.');
-  }
-  if (code === 'auth/network-request-failed') {
-    return new Error('Network error. Please check your internet connection and try again.');
-  }
-  if (code === 'auth/email-already-in-use') {
-    return new Error('This email already has an account. Please sign in instead.');
-  }
-  if (code === 'auth/weak-password') {
-    return new Error('Password must contain at least 6 characters.');
-  }
-
-  return new Error('Authentication could not be completed. Please try again.');
 };
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const setSessionToken = (token: string | null) => {
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) window.localStorage.setItem(SESSION_STORAGE_KEY, token);
+    else window.localStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable in private WebView modes; the in-memory user
+    // state still protects the current session until the page is reloaded.
+  }
+};
+
+const authHeaders = (): HeadersInit => {
+  const token = getSessionToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
+const parseAuthResponse = async (response: Response) => {
+  let payload: any = null;
+  try {
+    payload = await response.json();
+  } catch {
+    // Keep the generic status error below for non-JSON responses.
+  }
+  if (!response.ok) {
+    throw new Error(payload?.error || `Authentication request failed (${response.status}).`);
+  }
+  if (!payload?.user) throw new Error('Authentication response was incomplete.');
+  return payload;
+};
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
@@ -69,35 +70,63 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(firebaseAuth, (firebaseUser) => {
-      setCurrentUser(firebaseUser ? toAppUser(firebaseUser) : null);
+    const token = getSessionToken();
+    if (!token) {
       setLoading(false);
-    });
+      return;
+    }
 
-    return unsubscribe;
+    fetch(`${API_ORIGIN}/api/auth/me`, {
+      headers: authHeaders(),
+      credentials: 'omit',
+    })
+      .then(parseAuthResponse)
+      .then(({ user }) => setCurrentUser(user))
+      .catch(() => {
+        setSessionToken(null);
+        setCurrentUser(null);
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   const login = async (email: string, password: string) => {
-    try {
-      const credential = await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
-      setCurrentUser(toAppUser(credential.user));
-    } catch (error) {
-      throw friendlyAuthError(error);
-    }
+    const response = await fetch(`${API_ORIGIN}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'omit',
+      body: JSON.stringify({ email: email.trim(), password }),
+    });
+    const payload = await parseAuthResponse(response);
+    setSessionToken(payload.token);
+    setCurrentUser(payload.user);
   };
 
-  const register = async (email: string, password: string) => {
-    try {
-      const credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
-      setCurrentUser(toAppUser(credential.user));
-    } catch (error) {
-      throw friendlyAuthError(error);
-    }
+  const register = async (email: string, password: string, displayName?: string) => {
+    const response = await fetch(`${API_ORIGIN}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'omit',
+      body: JSON.stringify({ email: email.trim(), password, displayName }),
+    });
+    const payload = await parseAuthResponse(response);
+    setSessionToken(payload.token);
+    setCurrentUser(payload.user);
   };
 
   const logout = async () => {
-    await signOut(firebaseAuth);
-    setCurrentUser(null);
+    const token = getSessionToken();
+    try {
+      if (token) {
+        await fetch(`${API_ORIGIN}/api/auth/logout`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'omit',
+        });
+      }
+    } finally {
+      setSessionToken(null);
+      setCurrentUser(null);
+    }
   };
 
   return (

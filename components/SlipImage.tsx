@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getTelegramPhotoUrl } from '../services/telegramService';
+import { API_ORIGIN } from '../services/apiConfig';
+import { getSessionToken } from '../context/AuthContext';
 
-// Production frontend and API share the Render origin.
-const PROXY_SERVER = import.meta.env.DEV
-  ? 'http://localhost:3001'
-  : window.location.origin;
+const PROXY_SERVER = API_ORIGIN;
 
 
 interface SlipImageProps {
@@ -25,7 +24,10 @@ const fetchPdfBytes = async (telegramUrl: string): Promise<ArrayBuffer> => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const resp = await fetch(proxyUrl, { signal: controller.signal });
+    const headers = new Headers();
+    const token = getSessionToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    const resp = await fetch(proxyUrl, { headers, credentials: 'omit', signal: controller.signal });
     if (!resp.ok) throw new Error(`Proxy fetch failed: ${resp.status}`);
     return resp.arrayBuffer();
   } finally {
