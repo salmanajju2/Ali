@@ -16,6 +16,7 @@ import TotalVaultDetails from '../components/TotalVaultDetails';
 import { sendTelegramPhoto } from '../services/telegramService';
 import SlipImage from '../components/SlipImage';
 import { aivenDatabase } from '../services/AivenDatabaseService';
+import { applyRecorderScopedCashBalances } from '../services/historyBalance';
 
 const TRANSACTIONS_PER_PAGE = 50;
 
@@ -235,19 +236,9 @@ const HistoryPage: React.FC = () => {
       );
     }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-    let currentBalance = 0;
-    const txsWithBalance = [];
-    for (let i = 0; i < validTxs.length; i++) {
-      const tx = validTxs[i];
-      const authoritativeBalance = Number(tx.cashClosingBalance);
-      if (Number.isFinite(authoritativeBalance)) {
-        currentBalance = authoritativeBalance;
-      } else {
-        currentBalance += (tx.type === 'credit' ? tx.amount : -tx.amount);
-      }
-      txsWithBalance.unshift({ ...tx, closingBalance: currentBalance });
-    }
-    return txsWithBalance;
+    // PostgreSQL ka `cashClosingBalance` sabhi recorders ka aggregate hota hai.
+    // History card ko sirf us recorder ka apna cash ledger dikhana chahiye.
+    return applyRecorderScopedCashBalances(validTxs);
   }, [transactions, user]);
 
   const recorderNames = useMemo(() => {

@@ -23,4 +23,5 @@
 - [x] Diagnose and fix missing or delayed web-to-APK and APK-to-web real-time transaction synchronization, then rebuild the APK.
 - [x] Fix incorrect closing balance when cash transactions are displayed, including cache and sync reconciliation checks.
 - [x] Diagnose and fix APK sync failures, missing web-to-APK data, and deleted transaction resurrection with full cross-device regression coverage.
+- [x] Replace combined all-user History card balances with person/account-specific running cash balances while retaining page-level filtered totals.
 - [x] Verify and push the latest verified Ali Enterprises source state to GitHub main.
