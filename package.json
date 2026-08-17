@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "type-check": "tsc --noEmit",
-    "test": "node --test server/historyQuery.test.js server/manual-sync-reconciliation.test.mjs",
+    "test": "node --test server/historyQuery.test.js server/manual-sync-reconciliation.test.mjs server/forwardDayRollover.test.js",
     "test:regression": "npm test && node server/offline-conflict.test.mjs && node server/pagination-lazy.test.mjs && node server/pagination-edge-cases.test.mjs",
     "test:live:readonly": "node server/live-api-readonly-test.mjs && node server/live-change-cursor-audit.mjs && node server/live-socket-diagnostic.mjs"
   },

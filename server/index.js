@@ -5,6 +5,13 @@ const cors = require('cors');
 const path = require('path');
 const { Pool } = require('pg');
 const { randomBytes, randomUUID, scryptSync, timingSafeEqual } = require('crypto');
+const {
+  addDays,
+  calculateForwardRollover,
+  getIstBusinessDate,
+  getIstDayBounds,
+  isoAtIst,
+} = require('./forwardDayRollover');
 
 const app = express();
 
@@ -206,6 +213,27 @@ async function ensureTransactionSchema() {
   }
   await pool.query(`ALTER TABLE transactions ALTER COLUMN breakdown SET DEFAULT '{}'::jsonb`);
   await pool.query(`UPDATE transactions SET is_synced = TRUE WHERE is_synced IS NULL`);
+
+  // A one-row-per-business-day ledger makes the scheduled Forward Day process
+  // idempotent. The scheduler may retry a request, but this primary key prevents
+  // duplicate closing/opening pairs from being inserted for the same IST date.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS forward_day_rollovers (
+      business_date DATE PRIMARY KEY,
+      net_amount NUMERIC NOT NULL DEFAULT 0,
+      breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
+      closing_type TEXT CHECK (closing_type IN ('credit', 'debit')),
+      opening_type TEXT CHECK (opening_type IN ('credit', 'debit')),
+      closing_transaction_id BIGINT,
+      opening_transaction_id BIGINT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      closed_at TIMESTAMPTZ,
+      opened_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS forward_day_rollovers_open_idx ON forward_day_rollovers (business_date ASC) WHERE closing_transaction_id IS NOT NULL AND opening_transaction_id IS NULL`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_users (
@@ -659,6 +687,160 @@ function transactionForRealtime(transaction) {
   return transaction;
 }
 
+const FORWARD_DAY_LOCATION = 'KXU';
+const FORWARD_DAY_NOTE = 'KXU location FORWARD';
+const FORWARD_DAY_RECORDER = 'SYSTEM AUTOMATION';
+
+function isForwardDayRequestAuthorized(req) {
+  const expected = String(process.env.FORWARD_DAY_CRON_TOKEN || '');
+  const supplied = getBearerToken(req);
+  if (!expected || !supplied) return false;
+  const expectedBuffer = Buffer.from(expected);
+  const suppliedBuffer = Buffer.from(supplied);
+  return expectedBuffer.length === suppliedBuffer.length && timingSafeEqual(expectedBuffer, suppliedBuffer);
+}
+
+function writeForwardDayTransaction(client, { businessDate, type, amount, breakdown, entry }) {
+  const date = entry === 'closing'
+    ? isoAtIst(businessDate, 23, 59)
+    : isoAtIst(addDays(businessDate, 1), 0, 1);
+  const person = entry === 'closing' ? 'Day Closing' : 'Opening Balance';
+  const clientId = `forward-day:${businessDate}:${entry}`;
+  return client.query(`
+    INSERT INTO transactions (
+      date, manual_date, amount, type, company, person, notes, payment_method,
+      location, recorded_by, bank, slip, breakdown, is_synced, is_settlement, client_id
+    ) VALUES (
+      $1, $2, $3, $4, 'NA', $5, $6, 'cash',
+      $7, $8, NULL, NULL, $9::jsonb, TRUE, FALSE, $10
+    ) RETURNING ${transactionSelectFields}
+  `, [date, businessDate, amount, type, person, FORWARD_DAY_NOTE,
+    FORWARD_DAY_LOCATION, FORWARD_DAY_RECORDER, JSON.stringify(breakdown), clientId]);
+}
+
+async function closeForwardDay() {
+  await schemaReady;
+  const businessDate = getIstBusinessDate();
+  const { start, end } = getIstDayBounds(businessDate);
+  const client = await pool.connect();
+  let transaction = null;
+
+  try {
+    await client.query('BEGIN');
+    await client.query(`
+      INSERT INTO forward_day_rollovers (business_date)
+      VALUES ($1::date)
+      ON CONFLICT (business_date) DO NOTHING
+    `, [businessDate]);
+    const rolloverResult = await client.query(
+      'SELECT * FROM forward_day_rollovers WHERE business_date=$1::date FOR UPDATE',
+      [businessDate]
+    );
+    const rollover = rolloverResult.rows[0];
+    if (rollover.closing_transaction_id) {
+      await client.query('COMMIT');
+      return { ok: true, businessDate, skipped: 'already-closed' };
+    }
+
+    const dayTransactions = await client.query(`
+      SELECT type, amount::float8 AS amount, breakdown
+      FROM transactions
+      WHERE payment_method = 'cash' AND date >= $1 AND date < $2
+    `, [start, end]);
+    const calculated = calculateForwardRollover(dayTransactions.rows);
+    if (!calculated) {
+      await client.query(`
+        UPDATE forward_day_rollovers
+        SET status='no-balance', updated_at=CURRENT_TIMESTAMP
+        WHERE business_date=$1::date
+      `, [businessDate]);
+      await client.query('COMMIT');
+      return { ok: true, businessDate, skipped: 'zero-balance' };
+    }
+
+    const insertResult = await writeForwardDayTransaction(client, {
+      businessDate,
+      type: calculated.closingType,
+      amount: calculated.amount,
+      breakdown: calculated.breakdown,
+      entry: 'closing',
+    });
+    transaction = insertResult.rows[0];
+    await client.query(`
+      UPDATE forward_day_rollovers
+      SET net_amount=$2, breakdown=$3::jsonb, closing_type=$4, opening_type=$5,
+          closing_transaction_id=$6, status='closed', closed_at=CURRENT_TIMESTAMP,
+          updated_at=CURRENT_TIMESTAMP
+      WHERE business_date=$1::date
+    `, [businessDate, calculated.netAmount, JSON.stringify(calculated.breakdown),
+      calculated.closingType, calculated.openingType, transaction.id]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  const noteInventory = await getCashNoteInventorySnapshot();
+  publishTransactionEvent('add', { transaction: transactionForRealtime(transaction), noteInventory });
+  return { ok: true, businessDate, closingTransactionId: transaction.id };
+}
+
+async function openPendingForwardDays() {
+  await schemaReady;
+  const currentBusinessDate = getIstBusinessDate();
+  const client = await pool.connect();
+  const transactions = [];
+
+  try {
+    await client.query('BEGIN');
+    // If a prior scheduler request failed, finish every pending opening in date
+    // order. This is safer than assuming the call arrived at exactly 12:01 AM.
+    const pending = await client.query(`
+      SELECT * FROM forward_day_rollovers
+      WHERE closing_transaction_id IS NOT NULL
+        AND opening_transaction_id IS NULL
+        AND business_date < $1::date
+      ORDER BY business_date ASC
+      FOR UPDATE
+    `, [currentBusinessDate]);
+
+    for (const rollover of pending.rows) {
+      const businessDate = String(rollover.business_date).slice(0, 10);
+      const insertResult = await writeForwardDayTransaction(client, {
+        businessDate,
+        type: rollover.opening_type,
+        amount: Number(rollover.net_amount),
+        breakdown: rollover.breakdown || {},
+        entry: 'opening',
+      });
+      const transaction = insertResult.rows[0];
+      transactions.push(transaction);
+      await client.query(`
+        UPDATE forward_day_rollovers
+        SET opening_transaction_id=$2, status='complete', opened_at=CURRENT_TIMESTAMP,
+            updated_at=CURRENT_TIMESTAMP
+        WHERE business_date=$1::date
+      `, [businessDate, transaction.id]);
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  if (transactions.length > 0) {
+    const noteInventory = await getCashNoteInventorySnapshot();
+    for (const transaction of transactions) {
+      publishTransactionEvent('add', { transaction: transactionForRealtime(transaction), noteInventory });
+    }
+  }
+  return { ok: true, opened: transactions.map((transaction) => transaction.id) };
+}
+
 function parseTransactionLimit(value, fallback = -1) {
   const parsed = Number.parseInt(String(value || ''), 10);
   if (!Number.isFinite(parsed) || parsed < 1) return fallback;
@@ -908,6 +1090,39 @@ app.delete('/api/transactions/:id', async (req, res) => {
     publishTransactionEvent('delete', { ids: [String(id)], noteInventory });
     res.json({ noteInventory, ok: true });
   });
+});
+
+// The external daily scheduler invokes these two protected endpoints. They do
+// not rely on a browser/APK being open, and the database rollover ledger makes
+// every retry safe.
+app.post('/api/scheduled/forward-day-close', async (req, res) => {
+  if (!process.env.FORWARD_DAY_CRON_TOKEN) {
+    return res.status(503).json({ error: 'FORWARD_DAY_CRON_TOKEN is not configured.' });
+  }
+  if (!isForwardDayRequestAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized scheduled Forward Day request.' });
+  }
+  try {
+    res.json(await closeForwardDay());
+  } catch (error) {
+    console.error('Scheduled Forward Day close failed:', error);
+    res.status(500).json({ error: 'Forward Day close failed.', detail: error.message });
+  }
+});
+
+app.post('/api/scheduled/forward-day-open', async (req, res) => {
+  if (!process.env.FORWARD_DAY_CRON_TOKEN) {
+    return res.status(503).json({ error: 'FORWARD_DAY_CRON_TOKEN is not configured.' });
+  }
+  if (!isForwardDayRequestAuthorized(req)) {
+    return res.status(401).json({ error: 'Unauthorized scheduled Forward Day request.' });
+  }
+  try {
+    res.json(await openPendingForwardDays());
+  } catch (error) {
+    console.error('Scheduled Forward Day open failed:', error);
+    res.status(500).json({ error: 'Forward Day open failed.', detail: error.message });
+  }
 });
 
 // 5. Proxy & Utility Endpoints
