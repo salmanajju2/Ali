@@ -1,1 +1,18 @@
 - [ ] Persist denomination values entered on the Ali Enterprises transaction form and render them in history after save and refresh.
+- [x] Diagnose and fix live Render web-to-APK sync and Aiven PostgreSQL persistence issues.
+- [x] Rebuild and test the Ali Enterprises Android APK.
+- [x] Perform comprehensive codebase audit, bulk delete test, and sync verification without pushing to GitHub.
+- [x] Run evidence-based bulk-delete and sync regression tests, fix confirmed defects, and deliver a final verified report without GitHub push.
+- [x] Implement robust cursor pagination and lazy receipt loading for large datasets without pushing to GitHub.
+- [x] Run non-destructive sample large-data queries to test pagination and lazy loading.
+- [x] Run automated test for pagination and lazy loading verification.
+- [x] Verify pagination edge cases and sync, then push reviewed changes to GitHub.
+- [x] Check and report real-time web-to-APK sync status over Socket.IO and polling fallback.
+- [x] Test WebSocket-drop offline queueing, conflict resolution, and implement request-triggered Render health wake-up strategy.
+- [x] Verify Render production environment variables and build logs.
+- [ ] Verify whether cron health-check requests reach the Render production logs.
+- [ ] Build and verify a fresh Android debug APK from the current local codebase.
+- [x] Build and verify a fresh Android debug APK from the current local codebase.
+- [ ] Attempt APK installation and verify web-to-app real-time sync plus offline queue recovery.
+- [x] Attempt APK installation and verify web-to-app real-time sync plus offline queue recovery.
+- [ ] Review and push current Ali Enterprises changes to GitHub.

@@ -69,15 +69,19 @@ class RealtimeSyncService {
       rememberUpgrade: true
     });
 
-    // 💪 Keep-alive: Render.com 15 min mein server sleep kar deta hai
-    // Har 14 min mein ek ping bhejte hain taaki server jaag raha rahe
-    const keepAliveInterval = setInterval(() => {
-      fetch(socketUrl, { method: 'GET' }).catch(() => { /* ignore */ });
-      console.log('📶 Keep-alive ping sent to Render server.');
-    }, 14 * 60 * 1000); // 14 minutes
+    // 💪 Optimized Render Cold-Start Mitigation:
+    // Periodic background intervals removed. Instead, trigger a lightweight health wake-up
+    // on user interaction, app foregrounding, or transaction mutation attempts.
+    const wakeUpServer = () => {
+      fetch(socketUrl, { method: 'GET', mode: 'no-cors' }).catch(() => { /* ignore */ });
+    };
 
-    // Cleanup on page unload
-    window.addEventListener('beforeunload', () => clearInterval(keepAliveInterval));
+    // Wake up server on initial init and window focus / touch
+    wakeUpServer();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', wakeUpServer, { passive: true });
+      window.addEventListener('touchstart', wakeUpServer, { once: true, passive: true });
+    }
 
     this.socket.on('connect', () => {
       console.log('Connected to Socket Server.');
