@@ -68,19 +68,11 @@ export const getTelegramPhotoUrl = async (fileId: string): Promise<string | null
     console.log(`[Discord Fetch] Resolving URL for fileId: "${fileId}". Is Discord ID? ${isDiscordId}`);
 
     if (isDiscordId) {
-        try {
-            console.log(`[Discord Fetch] Calling proxy server: ${PROXY_SERVER}/discord/getFileUrl?messageId=${fileId}`);
-            const response = await proxyFetch(`${PROXY_SERVER}/discord/getFileUrl?messageId=${fileId}`);
-            if (response.ok) {
-                const data = await response.json();
-                console.log(`[Discord Fetch] Discord file URL response:`, data);
-                return data.url || null;
-            }
-            console.error(`[Discord Fetch] Discord proxy returned non-OK status: ${response.status}`);
-        } catch (error) {
-            console.error('[Discord Fetch] Failed to get URL from Discord Webhook proxy:', error);
-        }
-        return null;
+        // Resolve through the authenticated Render proxy. Discord CDN attachment
+        // URLs can expire and may not load reliably inside the APK WebView.
+        const proxyUrl = `${PROXY_SERVER}/discord/attachment/${encodeURIComponent(fileId)}`;
+        console.log(`[Discord Fetch] Using authenticated attachment proxy: ${proxyUrl}`);
+        return proxyUrl;
     }
 
     console.log('[Discord Fetch] Falling back to Telegram proxy for legacy fileId:', fileId);

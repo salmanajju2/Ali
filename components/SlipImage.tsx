@@ -35,6 +35,15 @@ const fetchPdfBytes = async (telegramUrl: string): Promise<ArrayBuffer> => {
   }
 };
 
+const fetchAuthenticatedMedia = async (url: string): Promise<Blob> => {
+  const headers = new Headers();
+  const token = await refreshSessionToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(url, { headers, credentials: 'omit' });
+  if (!response.ok) throw new Error(`Authenticated media fetch failed: ${response.status}`);
+  return response.blob();
+};
+
 // ─── PDF Canvas Renderer ─────────────────────────────────────────────────────
 interface PdfCanvasProps {
   pdfData: ArrayBuffer;
@@ -194,6 +203,7 @@ const SlipImage: React.FC<SlipImageProps> = ({
       return;
     }
 
+    let objectUrl: string | null = null;
     const resolveImage = async () => {
       if (!isMounted.current) return;
       setIsLoading(true);
@@ -224,16 +234,28 @@ const SlipImage: React.FC<SlipImageProps> = ({
             clearTimeout(overallTimer);
             return;
           }
-          resolvedUrl = url;
-          if (resolvedUrl.toLowerCase().includes('.pdf')) isThisPdf = true;
-          if (isMounted.current) setDownloadUrl(resolvedUrl);
+          const isDiscordProxy = url.includes('/discord/attachment/');
+          if (isDiscordProxy) {
+            const mediaBlob = await fetchAuthenticatedMedia(url);
+            if (mediaBlob.type === 'application/pdf' || src.includes(':pdf:')) {
+              isThisPdf = true;
+              if (isMounted.current) setPdfBytes(await mediaBlob.arrayBuffer());
+            }
+            objectUrl = URL.createObjectURL(mediaBlob);
+            resolvedUrl = objectUrl;
+            if (isMounted.current) setDownloadUrl(objectUrl);
+          } else {
+            resolvedUrl = url;
+            if (resolvedUrl.toLowerCase().includes('.pdf')) isThisPdf = true;
+            if (isMounted.current) setDownloadUrl(resolvedUrl);
 
-          if (isThisPdf) {
-            try {
-              const bytes = await fetchPdfBytes(resolvedUrl);
-              if (isMounted.current) setPdfBytes(bytes);
-            } catch (fetchErr) {
-              console.warn('PDF bytes fetch failed (proxy timeout/error):', fetchErr);
+            if (isThisPdf) {
+              try {
+                const bytes = await fetchPdfBytes(resolvedUrl);
+                if (isMounted.current) setPdfBytes(bytes);
+              } catch (fetchErr) {
+                console.warn('PDF bytes fetch failed (proxy timeout/error):', fetchErr);
+              }
             }
           }
 
@@ -277,6 +299,9 @@ const SlipImage: React.FC<SlipImageProps> = ({
     };
 
     resolveImage();
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
   }, [src]);
 
   const handleImageClick = (e: React.MouseEvent) => {

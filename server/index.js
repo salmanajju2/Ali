@@ -1174,6 +1174,44 @@ app.post('/telegram/deleteMessage', async (req, res) => {
   }
 });
 
+app.get('/discord/attachment/:messageId', async (req, res) => {
+  const { messageId } = req.params;
+  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhookUrl) return res.status(503).json({ error: 'DISCORD_WEBHOOK_URL is not configured on the server.' });
+  if (!/^\d{17,20}$/.test(messageId)) return res.status(400).json({ error: 'A valid Discord messageId is required.' });
+
+  try {
+    const cleanWebhookUrl = webhookUrl.split('?')[0].replace(/\/$/, '');
+    const messageResponse = await fetch(`${cleanWebhookUrl}/messages/${messageId}`);
+    if (!messageResponse.ok) return res.status(messageResponse.status === 404 ? 404 : 502).json({ error: 'Discord attachment was not found.' });
+
+    const message = await messageResponse.json();
+    const attachmentUrl = message.attachments?.[0]?.url;
+    if (!attachmentUrl || !/^https:\/\/(?:cdn\.)?discord(?:app)?\.com\//i.test(attachmentUrl)) {
+      return res.status(404).json({ error: 'No valid Discord attachment exists for this message.' });
+    }
+
+    const attachmentResponse = await fetch(attachmentUrl);
+    if (!attachmentResponse.ok) return res.status(502).json({ error: 'Unable to fetch the Discord attachment.' });
+
+    const contentType = attachmentResponse.headers.get('content-type') || 'application/octet-stream';
+    if (!/^(image\/(jpeg|png|webp|gif)|application\/pdf)$/i.test(contentType)) {
+      return res.status(415).json({ error: 'Unsupported Discord attachment type.' });
+    }
+
+    const bytes = Buffer.from(await attachmentResponse.arrayBuffer());
+    if (bytes.length > 15 * 1024 * 1024) return res.status(413).json({ error: 'Discord attachment is too large.' });
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', bytes.length);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.end(bytes);
+  } catch (error) {
+    console.error('Error streaming Discord attachment:', error);
+    return res.status(502).json({ error: 'Unable to load Discord attachment.' });
+  }
+});
+
 app.get('/discord/getFileUrl', async (req, res) => {
   const messageId = String(req.query.messageId || '');
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
