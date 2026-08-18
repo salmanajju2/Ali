@@ -72,7 +72,7 @@ class RealtimeSyncService {
       transports: ['polling', 'websocket'],
       auth: (callback: (auth: { token: string | null }) => void) => {
         void refreshSessionToken()
-          .then((token) => callback({ token }))
+          .then((token) => callback({ token: token || getSessionToken() }))
           .catch(() => callback({ token: getSessionToken() }));
       },
       withCredentials: false,
@@ -143,7 +143,7 @@ class RealtimeSyncService {
 
   private async connectAuthenticatedSocket() {
     if (!this.socket || this.socket.connected) return;
-    const token = await refreshSessionToken().catch(() => getSessionToken());
+    const token = (await refreshSessionToken().catch(() => null)) || getSessionToken();
     if (!token) {
       this.onStatusChange?.(false);
       this.startDisconnectedPolling();
