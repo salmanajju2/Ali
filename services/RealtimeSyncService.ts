@@ -1,6 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import { API_ORIGIN } from './apiConfig';
-import { getSessionToken } from '../context/AuthContext';
+import { getSessionToken, refreshSessionToken } from '../context/AuthContext';
 
 class RealtimeSyncService {
   private socket: Socket | null = null;
@@ -71,18 +71,21 @@ class RealtimeSyncService {
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       randomizationFactor: 0.5,
-      timeout: 20000, 
-      // WebSocket first gives live Web → APK events the lowest latency. If a mobile
-      // proxy/network blocks it, Socket.IO automatically falls back to polling.
-      transports: ['websocket', 'polling'],
+      timeout: 10000,
+      // Render and some Android networks establish polling faster than WebSocket.
+      // Start with polling for a quick authenticated handshake, then allow Socket.IO
+      // to upgrade to WebSocket when the connection supports it.
+      transports: ['polling', 'websocket'],
       auth: (callback: (auth: { token: string | null }) => void) => {
-        callback({ token: getSessionToken() });
+        void refreshSessionToken()
+          .then((token) => callback({ token }))
+          .catch(() => callback({ token: getSessionToken() }));
       },
       withCredentials: false,
       forceNew: true,
       perMessageDeflate: false as any,
       upgrade: true,
-      rememberUpgrade: true,
+      rememberUpgrade: false,
       // Do not perform an unauthenticated handshake during module startup. The
       // socket is connected after AppContext has a Firebase session token.
       autoConnect: false,
