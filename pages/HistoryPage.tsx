@@ -355,8 +355,18 @@ const HistoryPage: React.FC = () => {
     setShowAllDates(false);
   }, []);
 
+  // Realtime refreshes replace the filtered array reference even when the same rows
+  // are still visible. Preserve user selections across those refreshes, but prune
+  // IDs that disappear because of filters, pagination, or an actual deletion.
   useEffect(() => {
-    setSelectedIds([]);
+    const visibleIds = new Set(filteredTransactions.map(tx => tx.id));
+    setSelectedIds(previous => {
+      const next = previous.filter(id => visibleIds.has(id));
+      if (next.length === previous.length && next.every((id, index) => id === previous[index])) {
+        return previous;
+      }
+      return next;
+    });
   }, [filteredTransactions]);
 
   const totals = useMemo(() => {
