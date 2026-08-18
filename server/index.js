@@ -898,10 +898,11 @@ app.post('/api/transactions', async (req, res) => {
     ];
     const result = await pool.query(query, values);
     const transaction = result.rows[0];
-    // The REST mutation is authoritative. Broadcast only after Aiven PostgreSQL
-    // has returned the committed row, so every client receives the same data.
+    // The REST mutation is authoritative. Publish immediately after PostgreSQL
+    // returns the committed row; inventory is supplemental and must not block the
+    // transaction event reaching the other client/device.
+    publishTransactionEvent('add', { transaction: transactionForRealtime(transaction) });
     const noteInventory = await getCashNoteInventorySnapshot();
-    publishTransactionEvent('add', { transaction: transactionForRealtime(transaction), noteInventory });
     res.status(201).json({ id: transaction.id, noteInventory, ok: true });
   });
 });
@@ -953,9 +954,10 @@ app.put('/api/transactions/:id', async (req, res) => {
     const result = await pool.query(query, values);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Transaction not found.' });
     const transaction = result.rows[0];
-    // Broadcast the committed PostgreSQL row only after a successful update.
+    // Broadcast the committed PostgreSQL row immediately after the successful
+    // update. Inventory is supplemental and must not delay the transaction event.
+    publishTransactionEvent('update', { transaction: transactionForRealtime(transaction) });
     const noteInventory = await getCashNoteInventorySnapshot();
-    publishTransactionEvent('update', { transaction: transactionForRealtime(transaction), noteInventory });
     res.json({ id: transaction.id, noteInventory, ok: true });
   });
 });
@@ -969,10 +971,10 @@ app.delete('/api/transactions/:id', async (req, res) => {
     const result = await pool.query('DELETE FROM transactions WHERE id=$1', [id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Transaction not found.' });
 
-    // Broadcast only after PostgreSQL confirms the deletion. This avoids the old
-    // race where another device refreshed before the record was actually removed.
+    // Broadcast only after PostgreSQL confirms the deletion, but do not wait for
+    // the supplemental inventory query before notifying the other client/device.
+    publishTransactionEvent('delete', { ids: [String(id)] });
     const noteInventory = await getCashNoteInventorySnapshot();
-    publishTransactionEvent('delete', { ids: [String(id)], noteInventory });
     res.json({ noteInventory, ok: true });
   });
 });
