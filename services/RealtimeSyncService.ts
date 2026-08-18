@@ -8,6 +8,8 @@ class RealtimeSyncService {
   private syncCallback: ((data?: any) => Promise<void>) | null = null;
   private pollCallback: (() => Promise<void>) | null = null;
   private onStatusChange: ((connected: boolean) => void) | null = null;
+  private disconnectedPollTimer: number | null = null;
+  private readonly DISCONNECTED_POLL_MS = 5000;
 
   private getSocketUrl() {
     // In a native APK the frontend runs under a local WebView origin. The
@@ -27,13 +29,22 @@ class RealtimeSyncService {
     // connect event pehle fire ho gaya, toh initial server refresh miss nahi hona chahiye.
     if (this.socket?.connected) {
       void this.syncCallback({ action: 'sync', reason: 'callback-registered' });
-    } else if (getSessionToken()) {
-      this.socket?.connect();
+    } else {
+      const token = getSessionToken();
+      if (token && this.socket) {
+        // The singleton is created before Firebase finishes restoring the user.
+        // Set the fresh token explicitly before the first authenticated handshake.
+        this.socket.auth = { token };
+        this.socket.connect();
+      }
+      this.startDisconnectedPolling();
     }
   }
 
   public setPollCallback(callback: () => Promise<void>) {
     this.pollCallback = callback;
+    if (this.socket?.connected) this.stopDisconnectedPolling();
+    else this.startDisconnectedPolling();
   }
 
   public setStatusCallback(callback: (connected: boolean) => void) {
@@ -64,7 +75,6 @@ class RealtimeSyncService {
       // WebSocket first gives live Web → APK events the lowest latency. If a mobile
       // proxy/network blocks it, Socket.IO automatically falls back to polling.
       transports: ['websocket', 'polling'],
-      autoConnect: true,
       auth: (callback: (auth: { token: string | null }) => void) => {
         callback({ token: getSessionToken() });
       },
@@ -72,7 +82,10 @@ class RealtimeSyncService {
       forceNew: true,
       perMessageDeflate: false as any,
       upgrade: true,
-      rememberUpgrade: true
+      rememberUpgrade: true,
+      // Do not perform an unauthenticated handshake during module startup. The
+      // socket is connected after AppContext has a Firebase session token.
+      autoConnect: false,
     });
 
     // 💪 Optimized Render Cold-Start Mitigation:
@@ -90,7 +103,9 @@ class RealtimeSyncService {
     }
 
     this.socket.on('connect', () => {
+      this.stopDisconnectedPolling();
       console.log('Connected to Socket Server.');
+
       if (this.onStatusChange) this.onStatusChange(true);
 
       // A device can miss an event while Android WebView reconnects after a
@@ -111,6 +126,7 @@ class RealtimeSyncService {
 
     this.socket.on('disconnect', (reason) => {
       if (this.onStatusChange) this.onStatusChange(false);
+      this.startDisconnectedPolling();
       if (reason === 'io server disconnect' || reason === 'transport close') {
         this.socket?.connect();
       }
@@ -119,6 +135,7 @@ class RealtimeSyncService {
     this.socket.on('connect_error', (err) => {
       console.warn('Socket connection error:', err.message);
       if (this.onStatusChange) this.onStatusChange(false);
+      this.startDisconnectedPolling();
     });
 
     this.isInitialized = true;
@@ -126,6 +143,23 @@ class RealtimeSyncService {
 
   private lastPollTime = 0;
   private readonly POLL_DEBOUNCE_MS = 1500; // fast foreground refresh without repeated storms
+
+  private startDisconnectedPolling() {
+    if (this.disconnectedPollTimer !== null || !this.pollCallback) return;
+    this.disconnectedPollTimer = window.setInterval(() => {
+      if (this.socket?.connected) {
+        this.stopDisconnectedPolling();
+        return;
+      }
+      void this.pollCallback?.();
+    }, this.DISCONNECTED_POLL_MS);
+  }
+
+  private stopDisconnectedPolling() {
+    if (this.disconnectedPollTimer === null) return;
+    window.clearInterval(this.disconnectedPollTimer);
+    this.disconnectedPollTimer = null;
+  }
 
   private registerCapacitorLifecycle() {
     setTimeout(() => {
@@ -164,6 +198,8 @@ class RealtimeSyncService {
       if (!this.socket) { resolve(); return; }
 
       if (!this.socket.connected) {
+        const token = getSessionToken();
+        if (token) this.socket.auth = { token };
         this.socket.connect();
       }
 
