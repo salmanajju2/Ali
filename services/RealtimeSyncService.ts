@@ -30,13 +30,7 @@ class RealtimeSyncService {
     if (this.socket?.connected) {
       void this.syncCallback({ action: 'sync', reason: 'callback-registered' });
     } else {
-      const token = getSessionToken();
-      if (token && this.socket) {
-        // The singleton is created before Firebase finishes restoring the user.
-        // Set the fresh token explicitly before the first authenticated handshake.
-        this.socket.auth = { token };
-        this.socket.connect();
-      }
+      void this.connectAuthenticatedSocket();
       this.startDisconnectedPolling();
     }
   }
@@ -147,6 +141,18 @@ class RealtimeSyncService {
   private lastPollTime = 0;
   private readonly POLL_DEBOUNCE_MS = 1500; // fast foreground refresh without repeated storms
 
+  private async connectAuthenticatedSocket() {
+    if (!this.socket || this.socket.connected) return;
+    const token = await refreshSessionToken().catch(() => getSessionToken());
+    if (!token) {
+      this.onStatusChange?.(false);
+      this.startDisconnectedPolling();
+      return;
+    }
+    this.socket.auth = { token };
+    this.socket.connect();
+  }
+
   private startDisconnectedPolling() {
     if (this.disconnectedPollTimer !== null || !this.pollCallback) return;
     this.disconnectedPollTimer = window.setInterval(() => {
@@ -174,14 +180,14 @@ class RealtimeSyncService {
               if (now - this.lastPollTime < this.POLL_DEBOUNCE_MS) {
                 console.log('App foregrounded. Socket reconnect only (poll debounced).');
                 if (this.socket && !this.socket.connected) {
-                  this.socket.connect();
+                  void this.connectAuthenticatedSocket();
                 }
                 return;
               }
               this.lastPollTime = now;
               console.log('App foregrounded. Reconnecting socket and refreshing data.');
               if (this.socket && !this.socket.connected) {
-                this.socket.connect();
+                void this.connectAuthenticatedSocket();
               }
               void this.pollCallback?.();
             }
@@ -201,9 +207,7 @@ class RealtimeSyncService {
       if (!this.socket) { resolve(); return; }
 
       if (!this.socket.connected) {
-        const token = getSessionToken();
-        if (token) this.socket.auth = { token };
-        this.socket.connect();
+        void this.connectAuthenticatedSocket();
       }
 
       console.log('Broadcasting via Socket...', data.action);
@@ -219,10 +223,11 @@ class RealtimeSyncService {
   public reconnect() {
     console.log('Manual reconnect triggered...');
     if (this.socket) {
-      this.socket.disconnect().connect();
+      this.socket.disconnect();
+      void this.connectAuthenticatedSocket();
     } else {
       this.isInitialized = false;
-      this.init();
+      void this.init().then(() => this.connectAuthenticatedSocket());
     }
   }
 }
