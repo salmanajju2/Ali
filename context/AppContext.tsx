@@ -1571,27 +1571,49 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       console.warn('Local delete cache update failed; queued server deletion is retained:', error);
     }
 
-    const queuedDeleteResult = await flushPendingDeletes();
-    if (queuedDeleteResult.pendingIds.length > 0) {
-      setDatabaseConnected(false);
-      console.log(`📴 ${queuedDeleteResult.pendingIds.length} deletion(s) remain queued for the next reconnect.`);
-    } else if (queuedDeleteResult.confirmedIds.length > 0) {
-      console.log(`✅ Aiven PostgreSQL delete confirmed for ${queuedDeleteResult.confirmedIds.length} transaction(s).`);
-      lastFetchTimeRef.current = 0;
-    }
-
-    // Media cleanup is independent from transaction persistence. It is deliberately
-    // non-blocking so an offline file deletion can never undo the queued DB delete.
-    for (const tx of transactionsToDelete) {
-      if (tx.slip && tx.slip.startsWith('tg:')) {
-        const content = tx.slip.replace(/^tg:(pdf:)?/, '');
-        const messageId = content.split(':')[1];
-        if (messageId) {
-          void deleteTelegramMessage(messageId).catch(error =>
-            console.warn(`Media cleanup will be retried separately for transaction ${tx.id}:`, error)
-          );
-        }
+    let queuedDeleteResult = { confirmedIds: [] as string[], pendingIds: uniqueIds };
+    try {
+      queuedDeleteResult = await flushPendingDeletes();
+      if (queuedDeleteResult.pendingIds.length > 0) {
+        setDatabaseConnected(false);
+        console.log(`📴 ${queuedDeleteResult.pendingIds.length} deletion(s) remain queued for the next reconnect.`);
+      } else if (queuedDeleteResult.confirmedIds.length > 0) {
+        console.log(`✅ Aiven PostgreSQL delete confirmed for ${queuedDeleteResult.confirmedIds.length} transaction(s).`);
+        lastFetchTimeRef.current = 0;
       }
+    } catch (error) {
+      // Keep the durable DB delete intent, but do not skip Telegram cleanup just
+      // because Aiven/Render is temporarily unavailable.
+      setDatabaseConnected(false);
+      console.warn('Aiven deletion request failed; Telegram media cleanup will still run:', error);
+    } finally {
+      // Telegram cleanup is independent from PostgreSQL persistence. Await it so
+      // the request is not lost when the user immediately navigates away or closes
+      // the Android WebView after deleting a transaction.
+      const cleanupTasks = transactionsToDelete.map(async tx => {
+        const slip = String(tx.slip || '');
+        const messageMatch = /^tg:(?:pdf:)?[^:]+:(\d+)$/.exec(slip);
+        if (!messageMatch) {
+          if (slip.startsWith('tg:')) {
+            console.warn(`Telegram media cleanup skipped for transaction ${tx.id}: slip has no message ID.`);
+          }
+          return;
+        }
+
+        const messageId = messageMatch[1];
+        const deleted = await deleteTelegramMessage(messageId);
+        if (!deleted) {
+          throw new Error(`Telegram did not confirm deletion for message ${messageId}.`);
+        }
+        console.log(`✅ Telegram media deleted for transaction ${tx.id}.`);
+      });
+
+      const cleanupResults = await Promise.allSettled(cleanupTasks);
+      cleanupResults.forEach(result => {
+        if (result.status === 'rejected') {
+          console.warn('Telegram media cleanup failed; the transaction was still deleted locally and remains queued for retry:', result.reason);
+        }
+      });
     }
   }, [flushPendingDeletes]);
 
