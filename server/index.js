@@ -1114,6 +1114,19 @@ app.get('/telegram/fetchFile', async (req, res) => {
 // multiple devices does not exhaust the webhook bucket at the same time.
 let discordUploadQueue = Promise.resolve();
 let discordNextAllowedAt = 0;
+const discordMissingMessageCache = new Map();
+const DISCORD_MISSING_CACHE_MS = 10 * 60 * 1000;
+
+function isRecentlyMissingDiscordMessage(messageId) {
+  const expiresAt = discordMissingMessageCache.get(messageId) || 0;
+  if (expiresAt > Date.now()) return true;
+  discordMissingMessageCache.delete(messageId);
+  return false;
+}
+
+function markDiscordMessageMissing(messageId) {
+  discordMissingMessageCache.set(messageId, Date.now() + DISCORD_MISSING_CACHE_MS);
+}
 
 function getDiscordWebhookUrl() {
   const rawUrl = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
@@ -1270,6 +1283,10 @@ app.get('/discord/attachment/:messageId', async (req, res) => {
   const { messageId } = req.params;
   if (!/^\d{17,20}$/.test(messageId)) return res.status(400).json({ error: 'A valid Discord messageId is required.' });
 
+  if (isRecentlyMissingDiscordMessage(messageId)) {
+    return res.status(404).json({ error: 'Discord attachment was not found.' });
+  }
+
   try {
     const webhookUrl = getDiscordWebhookUrl();
     const messageResponse = await fetch(`${webhookUrl}/messages/${messageId}`, {
@@ -1278,7 +1295,10 @@ app.get('/discord/attachment/:messageId', async (req, res) => {
         'User-Agent': 'ALI-ENTERPRISES/1.0 (+https://ali-ltyt.onrender.com)',
       },
     });
-    if (!messageResponse.ok) return res.status(messageResponse.status === 404 ? 404 : 502).json({ error: 'Discord attachment was not found.' });
+    if (!messageResponse.ok) {
+      if (messageResponse.status === 404) markDiscordMessageMissing(messageId);
+      return res.status(messageResponse.status === 404 ? 404 : 503).json({ error: 'Discord attachment was not found.' });
+    }
 
     const message = await messageResponse.json();
     const attachmentUrl = message.attachments?.[0]?.url;
@@ -1311,6 +1331,10 @@ app.get('/discord/getFileUrl', async (req, res) => {
   const messageId = String(req.query.messageId || '');
   if (!/^\d{17,20}$/.test(messageId)) return res.status(400).json({ error: 'A valid Discord messageId is required.' });
 
+  if (isRecentlyMissingDiscordMessage(messageId)) {
+    return res.status(404).json({ error: 'Discord attachment was not found.' });
+  }
+
   try {
     const webhookUrl = getDiscordWebhookUrl();
     const response = await fetch(`${webhookUrl}/messages/${messageId}`, {
@@ -1320,7 +1344,8 @@ app.get('/discord/getFileUrl', async (req, res) => {
       },
     });
     if (!response.ok) {
-      return res.status(response.status).json({ error: 'Discord attachment was not found.' });
+      if (response.status === 404) markDiscordMessageMissing(messageId);
+      return res.status(response.status === 404 ? 404 : 503).json({ error: 'Discord attachment was not found.' });
     }
     const message = await response.json();
     const url = message.attachments?.[0]?.url;
