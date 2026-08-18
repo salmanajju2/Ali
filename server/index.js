@@ -1081,6 +1081,7 @@ app.get('/telegram/fetchFile', async (req, res) => {
   const fileId = String(req.query.fileId || '').trim();
   const tokens = [process.env.PHOTO_BOT_TOKEN, process.env.TELEGRAM_BOT_TOKEN].filter(Boolean);
   let upstreamUrl = '';
+  let inferredContentType = '';
 
   try {
     if (fileId) {
@@ -1091,7 +1092,13 @@ app.get('/telegram/fetchFile', async (req, res) => {
         const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`);
         const fileData = await fileResponse.json();
         if (fileData.ok && fileData.result?.file_path) {
-          upstreamUrl = `https://api.telegram.org/file/bot${botToken}/${fileData.result.file_path}`;
+          const filePath = String(fileData.result.file_path);
+          const extension = filePath.toLowerCase().split('.').pop() || '';
+          const mimeByExtension = {
+            jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', pdf: 'application/pdf',
+          };
+          inferredContentType = mimeByExtension[extension] || '';
+          upstreamUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
           break;
         }
       }
@@ -1112,10 +1119,11 @@ app.get('/telegram/fetchFile', async (req, res) => {
 
     const declaredLength = Number(telegramRes.headers.get('content-length') || 0);
     if (declaredLength > 15 * 1024 * 1024) return res.status(413).json({ error: 'File is too large.' });
-    const contentType = telegramRes.headers.get('content-type') || 'application/octet-stream';
-    if (!/^(image\/(jpeg|png|webp|gif)|application\/pdf)$/.test(contentType.split(';')[0].trim())) {
-      return res.status(415).json({ error: 'Unsupported file type.' });
-    }
+    const upstreamContentType = (telegramRes.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const contentType = /^(image\/(jpeg|png|webp|gif)|application\/pdf)$/.test(upstreamContentType)
+      ? upstreamContentType
+      : inferredContentType;
+    if (!contentType) return res.status(415).json({ error: 'Unsupported file type.' });
     const buffer = await telegramRes.arrayBuffer();
     if (buffer.byteLength > 15 * 1024 * 1024) return res.status(413).json({ error: 'File is too large.' });
 
