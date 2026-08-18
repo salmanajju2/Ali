@@ -22,39 +22,41 @@ export const sendTelegramPhoto = async (base64Data: string): Promise<string | nu
     const isPdf = mime === 'application/pdf';
     const fileName = isPdf ? 'slip.pdf' : mime === 'image/png' ? 'slip.png' : 'slip.jpg';
 
-    console.log(`[Discord Upload] Initiating upload for file: ${fileName}, mime: ${mime}`);
-    console.log(`[Discord Upload] Target Proxy Server: ${PROXY_SERVER}`);
+    console.log(`[Telegram Upload] Initiating upload for file: ${fileName}, mime: ${mime}`);
+    console.log(`[Telegram Upload] Target Proxy Server: ${PROXY_SERVER}`);
 
-    // Call proxy server's Discord upload endpoint
-    const response = await proxyFetch(`${PROXY_SERVER}/discord/upload`, {
+    const response = await proxyFetch(`${PROXY_SERVER}/telegram/sendPhoto`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        base64Data,
+        base64Photo: base64Data,
         fileName,
       }),
     });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`[Discord Upload] Proxy returned error status ${response.status}:`, errText);
-      throw new Error(`Proxy upload returned ${response.status}`);
+      console.error(`[Telegram Upload] Proxy returned error status ${response.status}:`, errText);
+      throw new Error(`Telegram upload returned ${response.status}`);
     }
 
     const data = await response.json();
-    console.log('[Discord Upload] Proxy response data:', data);
+    console.log('[Telegram Upload] Proxy response data:', { success: data.success, mediaType: data.mediaType });
 
-    if (data.success && data.messageId) {
-      const retValue = isPdf ? `pdf:${data.messageId}:${data.messageId}` : `${data.messageId}:${data.messageId}`;
-      console.log(`[Discord Upload] Success! Storing slip identifier: tg:${retValue}`);
+    if (data.success && data.fileId && data.messageId) {
+      // Store file_id for retrieval and message_id for Telegram deletion.
+      const retValue = data.mediaType === 'pdf' || isPdf
+        ? `pdf:${data.fileId}:${data.messageId}`
+        : `${data.fileId}:${data.messageId}`;
+      console.log(`[Telegram Upload] Success! Storing slip identifier: tg:${retValue}`);
       return retValue;
     }
-    console.warn('[Discord Upload] Proxy upload returned success=false or missing messageId');
+    console.warn('[Telegram Upload] Proxy upload returned success=false or missing Telegram IDs');
     return null;
   } catch (error) {
-    console.error('[Discord Upload] Failed to upload via Discord Webhook proxy:', error);
+    console.error('[Telegram Upload] Failed to upload via Telegram proxy:', error);
     return null;
   }
 };
@@ -63,20 +65,19 @@ export const sendTelegramPhoto = async (base64Data: string): Promise<string | nu
  * Gets a temporary file URL from the bots
  */
 export const getTelegramPhotoUrl = async (fileId: string): Promise<string | null> => {
-    // Check if it's a Discord message ID (17-20 digit number)
+    // Existing Discord records use a numeric message ID; keep read compatibility
+    // while all new uploads use Telegram file_id:message_id identifiers.
     const isDiscordId = /^\d{17,20}$/.test(fileId);
-    console.log(`[Discord Fetch] Resolving URL for fileId: "${fileId}". Is Discord ID? ${isDiscordId}`);
+    console.log(`[Receipt Fetch] Resolving fileId: "${fileId}". Is legacy Discord ID? ${isDiscordId}`);
 
     if (isDiscordId) {
-        // Resolve through the authenticated Render proxy. Discord CDN attachment
-        // URLs can expire and may not load reliably inside the APK WebView.
         const proxyUrl = `${PROXY_SERVER}/discord/attachment/${encodeURIComponent(fileId)}`;
-        console.log(`[Discord Fetch] Using authenticated attachment proxy: ${proxyUrl}`);
+        console.log(`[Legacy Discord Fetch] Using authenticated attachment proxy: ${proxyUrl}`);
         return proxyUrl;
     }
 
-    console.log('[Discord Fetch] Falling back to Telegram proxy for legacy fileId:', fileId);
-    // Fallback to Telegram (legacy) via proxy to bypass regional blocking in India
+    console.log('[Telegram Fetch] Resolving Telegram file through authenticated proxy:', fileId);
+    // Resolve through the authenticated Telegram proxy; bot credentials remain server-side.
     try {
         const response = await proxyFetch(`${PROXY_SERVER}/telegram/getFileUrl?fileId=${encodeURIComponent(fileId)}`);
         if (response.ok) {
@@ -85,12 +86,12 @@ export const getTelegramPhotoUrl = async (fileId: string): Promise<string | null
                 const proxiedUrl = data.proxyUrl?.startsWith('/')
                   ? `${PROXY_SERVER}${data.proxyUrl}`
                   : `${PROXY_SERVER}/telegram/fetchFile?url=${encodeURIComponent(data.url)}`;
-                console.log(`[Telegram Fetch] Successfully resolved legacy proxied URL:`, proxiedUrl);
+                console.log(`[Telegram Fetch] Successfully resolved proxied URL:`, proxiedUrl);
                 return proxiedUrl;
             }
         }
     } catch (error) {
-        console.error('[Telegram Fetch] Failed to resolve legacy file via proxy:', error);
+        console.error('[Telegram Fetch] Failed to resolve file via proxy:', error);
     }
     return null;
 };
@@ -118,29 +119,29 @@ export const deleteTelegramMessage = async (messageId: string | number): Promise
   
   // Check if it's a Discord message ID
   const isDiscordId = /^\d{17,20}$/.test(String(messageId));
-  console.log(`[Discord Delete] Request to delete messageId: "${messageId}". Is Discord ID? ${isDiscordId}`);
+  console.log(`[Receipt Delete] Request to delete messageId: "${messageId}". Is legacy Discord ID? ${isDiscordId}`);
 
   if (isDiscordId) {
     try {
-      console.log(`[Discord Delete] Calling proxy server delete message endpoint: ${PROXY_SERVER}/discord/deleteMessage/${messageId}`);
+      console.log(`[Legacy Discord Delete] Calling proxy server delete message endpoint: ${PROXY_SERVER}/discord/deleteMessage/${messageId}`);
       const response = await proxyFetch(`${PROXY_SERVER}/discord/deleteMessage/${messageId}`, {
         method: 'DELETE',
       });
       if (response.ok) {
         const data = await response.json();
-        console.log(`[Discord Delete] Discord delete response:`, data);
+        console.log(`[Legacy Discord Delete] Discord delete response:`, data);
         return data.success;
       }
       const errText = await response.text();
-      console.error(`[Discord Delete] Discord delete proxy returned status ${response.status}:`, errText);
+      console.error(`[Legacy Discord Delete] Discord delete proxy returned status ${response.status}:`, errText);
       return false;
     } catch (error) {
-      console.error('[Discord Delete] Failed to delete Discord message via proxy:', error);
+      console.error('[Legacy Discord Delete] Failed to delete Discord message via proxy:', error);
       return false;
     }
   }
 
-  console.log('[Discord Delete] Falling back to Telegram delete message for ID:', messageId);
+  console.log('[Telegram Delete] Deleting Telegram message ID:', messageId);
   // Fallback to the authenticated Telegram proxy. Bot credentials stay server-side.
   try {
     const response = await proxyFetch(`${PROXY_SERVER}/telegram/deleteMessage`, {
@@ -149,10 +150,10 @@ export const deleteTelegramMessage = async (messageId: string | number): Promise
       body: JSON.stringify({ messageId: Number(messageId) }),
     });
     const data = await response.json();
-    console.log('[Discord Delete] Telegram legacy delete response:', data);
+    console.log('[Telegram Delete] Delete response:', data);
     return data.ok;
   } catch (error) {
-    console.error('[Discord Delete] Failed to delete Telegram message:', error);
+    console.error('[Telegram Delete] Failed to delete Telegram message:', error);
     return false;
   }
 };

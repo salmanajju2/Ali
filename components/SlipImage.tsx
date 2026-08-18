@@ -234,8 +234,8 @@ const SlipImage: React.FC<SlipImageProps> = ({
             clearTimeout(overallTimer);
             return;
           }
-          const isDiscordProxy = url.includes('/discord/attachment/');
-          if (isDiscordProxy) {
+          const isAuthenticatedMediaProxy = url.includes('/discord/attachment/') || url.includes('/telegram/fetchFile');
+          if (isAuthenticatedMediaProxy) {
             const mediaBlob = await fetchAuthenticatedMedia(url);
             if (mediaBlob.type === 'application/pdf' || src.includes(':pdf:')) {
               isThisPdf = true;

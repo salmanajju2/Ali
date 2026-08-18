@@ -1006,31 +1006,53 @@ app.post('/telegram/sendPhoto', async (req, res) => {
   const botToken = process.env.PHOTO_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.PHOTO_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
   const base64Photo = String(req.body?.base64Photo || '');
+  const requestedFileName = String(req.body?.fileName || 'slip.jpg').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'slip.jpg';
   if (!botToken || !chatId) return res.status(503).json({ error: 'Telegram photo integration is not configured on the server.' });
-  if (!base64Photo || base64Photo.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'Photo payload is missing or too large.' });
+  if (!base64Photo || base64Photo.length > 22 * 1024 * 1024) return res.status(413).json({ error: 'Photo payload is missing or too large.' });
+
   try {
     const base64Parts = base64Photo.split(',');
     if (base64Parts.length !== 2) return res.status(400).json({ error: 'Invalid base64 photo payload.' });
-    const mime = base64Parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
-    const bstr = atob(base64Parts[1]);
-    let n = bstr.length;
-    const u8arr = new Uint8Array(n);
-    while (n--) u8arr[n] = bstr.charCodeAt(n);
-    const blob = new Blob([u8arr], { type: mime });
+    const mime = (base64Parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg').toLowerCase();
+    const isPdf = mime === 'application/pdf' || requestedFileName.toLowerCase().endsWith('.pdf');
+    const isPhoto = /^image\/(jpeg|png)$/i.test(mime) && !isPdf;
+    const telegramMethod = isPhoto ? 'sendPhoto' : 'sendDocument';
+    const fieldName = isPhoto ? 'photo' : 'document';
+    const fallbackName = isPdf ? 'slip.pdf' : 'slip.jpg';
+    const fileName = requestedFileName.includes('.') ? requestedFileName : fallbackName;
+    const buffer = Buffer.from(base64Parts[1], 'base64');
+    if (!buffer.length || buffer.length > 15 * 1024 * 1024) return res.status(413).json({ error: 'Receipt file must be between 1 byte and 15 MB.' });
 
     const formData = new FormData();
     formData.append('chat_id', chatId);
-    formData.append('photo', blob, 'slip.jpg');
+    formData.append(fieldName, new Blob([buffer], { type: mime }), fileName);
 
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/${telegramMethod}`, {
       method: 'POST',
+      headers: { Accept: 'application/json' },
       body: formData,
     });
-    const result = await response.json();
-    res.json(result);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok || !data.result?.message_id) {
+      console.error('Telegram upload rejected:', response.status, data.description || 'unknown error');
+      return res.status(502).json({ error: 'Telegram rejected the receipt upload.' });
+    }
+
+    const message = data.result;
+    const media = isPhoto
+      ? message.photo?.[message.photo.length - 1]
+      : message.document;
+    if (!media?.file_id) return res.status(502).json({ error: 'Telegram upload returned no file ID.' });
+
+    return res.json({
+      success: true,
+      fileId: media.file_id,
+      messageId: message.message_id,
+      mediaType: isPdf ? 'pdf' : 'image',
+    });
   } catch (error) {
-    console.error('Error in proxy sendPhoto:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Error in proxy Telegram upload:', error?.message || error);
+    return res.status(502).json({ error: 'Unable to upload receipt to Telegram.' });
   }
 });
 
@@ -1110,10 +1132,8 @@ app.get('/telegram/fetchFile', async (req, res) => {
   }
 });
 
-// Discord webhook calls are serialized per Render process so a burst of uploads from
-// multiple devices does not exhaust the webhook bucket at the same time.
-let discordUploadQueue = Promise.resolve();
-let discordNextAllowedAt = 0;
+// Legacy Discord attachment compatibility for historical records only.
+// New receipt uploads use Telegram and never call Discord.
 const discordMissingMessageCache = new Map();
 const DISCORD_MISSING_CACHE_MS = 10 * 60 * 1000;
 
@@ -1146,118 +1166,6 @@ function getDiscordWebhookUrl() {
   parsed.search = '';
   return parsed.toString().replace(/\/$/, '');
 }
-
-function waitForDiscord(ms) {
-  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
-}
-
-function getDiscordRetryAfter(response, responseText) {
-  const headerSeconds = Number(response.headers.get('retry-after') || response.headers.get('x-ratelimit-reset-after'));
-  if (Number.isFinite(headerSeconds) && headerSeconds >= 0) return headerSeconds;
-  try {
-    const body = JSON.parse(responseText);
-    const bodySeconds = Number(body?.retry_after);
-    return Number.isFinite(bodySeconds) && bodySeconds >= 0 ? bodySeconds : null;
-  } catch {
-    return null;
-  }
-}
-
-function safeDiscordError(response, responseText) {
-  const isCloudflareBan = response.status === 429 && /error\s+1015|access denied/i.test(responseText);
-  if (isCloudflareBan) {
-    return Object.assign(new Error('Discord temporarily rate-limited this server. Please wait a minute and retry.'), { httpStatus: 503 });
-  }
-
-  let body;
-  try { body = JSON.parse(responseText); } catch { body = null; }
-  const message = String(body?.message || '').trim();
-  const error = Object.assign(
-    new Error(message || `Discord upload failed with HTTP ${response.status}.`),
-    { httpStatus: response.status === 429 ? 503 : 502 }
-  );
-  return error;
-}
-
-async function postDiscordReceipt({ webhookUrl, buffer, mime, fileName }) {
-  const maxAttempts = 2;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const waitMs = Math.max(0, discordNextAllowedAt - Date.now());
-    if (waitMs) await waitForDiscord(waitMs);
-
-    const formData = new FormData();
-    formData.append('files[0]', new Blob([buffer], { type: mime }), fileName);
-    const response = await fetch(`${webhookUrl}?wait=true`, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'ALI-ENTERPRISES/1.0 (+https://ali-ltyt.onrender.com)',
-      },
-      body: formData,
-    });
-    const responseText = await response.text();
-
-    if (response.ok) {
-      try {
-        return JSON.parse(responseText);
-      } catch {
-        throw Object.assign(new Error('Discord returned an invalid success response.'), { httpStatus: 502 });
-      }
-    }
-
-    const retryAfter = getDiscordRetryAfter(response, responseText);
-    const isCloudflareBan = response.status === 429 && /error\s+1015|access denied/i.test(responseText);
-    // A Cloudflare 1015 page is an IP restriction, not a normal bucket 429. Do
-    // not hammer Discord with retries that would extend the temporary restriction.
-    if (response.status === 429 && !isCloudflareBan && attempt < maxAttempts - 1 && retryAfter !== null && retryAfter <= 15) {
-      discordNextAllowedAt = Date.now() + Math.ceil(retryAfter * 1000);
-      await waitForDiscord(Math.ceil(retryAfter * 1000));
-      continue;
-    }
-
-    throw safeDiscordError(response, responseText);
-  }
-  throw Object.assign(new Error('Discord upload failed after retrying.'), { httpStatus: 502 });
-}
-
-function enqueueDiscordUpload(task) {
-  const run = discordUploadQueue.then(task, task);
-  discordUploadQueue = run.catch(() => undefined);
-  return run;
-}
-
-// Discord Upload Proxy
-app.post('/discord/upload', async (req, res) => {
-  const base64Data = String(req.body?.base64Data || '');
-  const rawFileName = String(req.body?.fileName || 'slip.jpg');
-  const fileName = rawFileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'slip.jpg';
-  if (!base64Data || base64Data.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'Upload is missing or too large.' });
-
-  try {
-    const base64Parts = base64Data.split(',');
-    if (base64Parts.length !== 2) return res.status(400).json({ error: 'Invalid base64 upload payload.' });
-    const mime = base64Parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
-    if (!/^(image\/(jpeg|png|webp)|application\/pdf)$/.test(mime)) return res.status(415).json({ error: 'Only JPG, PNG, WebP, and PDF files are supported.' });
-    const buffer = Buffer.from(base64Parts[1], 'base64');
-    if (!buffer.length) return res.status(400).json({ error: 'Upload contains no file data.' });
-    if (buffer.length > 15 * 1024 * 1024) return res.status(413).json({ error: 'Upload is too large.' });
-
-    const result = await enqueueDiscordUpload(() => postDiscordReceipt({
-      webhookUrl: getDiscordWebhookUrl(),
-      buffer,
-      mime,
-      fileName,
-    }));
-    return res.status(201).json({
-      success: true,
-      messageId: result.id,
-      url: result.attachments?.[0]?.url || '',
-    });
-  } catch (error) {
-    console.error('Error in proxy /discord/upload:', error?.message || error);
-    return res.status(error?.httpStatus || 502).json({ error: error?.message || 'Unable to upload receipt to Discord.' });
-  }
-});
 
 app.post('/telegram/deleteMessage', async (req, res) => {
   const botToken = process.env.PHOTO_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;

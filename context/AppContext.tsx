@@ -1177,10 +1177,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         try {
           let transactionForServer: Transaction = newTransaction;
 
-          // Receipt media belongs in Discord. A receipt-upload failure must not prevent the
+          // Receipt media belongs in Telegram. A receipt-upload failure must not prevent the
           // financial transaction itself from reaching PostgreSQL.
           if (slipToStore && slipToStore.startsWith('data:')) {
-            console.log('📤 Uploading slip to Discord in background...');
+            console.log('📤 Uploading slip to Telegram in background...');
             try {
               const fileId = await sendTelegramPhoto(slipToStore);
               if (fileId) {
