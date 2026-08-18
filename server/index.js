@@ -1268,13 +1268,16 @@ app.post('/telegram/deleteMessage', async (req, res) => {
 
 app.get('/discord/attachment/:messageId', async (req, res) => {
   const { messageId } = req.params;
-  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-  if (!webhookUrl) return res.status(503).json({ error: 'DISCORD_WEBHOOK_URL is not configured on the server.' });
   if (!/^\d{17,20}$/.test(messageId)) return res.status(400).json({ error: 'A valid Discord messageId is required.' });
 
   try {
-    const cleanWebhookUrl = webhookUrl.split('?')[0].replace(/\/$/, '');
-    const messageResponse = await fetch(`${cleanWebhookUrl}/messages/${messageId}`);
+    const webhookUrl = getDiscordWebhookUrl();
+    const messageResponse = await fetch(`${webhookUrl}/messages/${messageId}`, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'ALI-ENTERPRISES/1.0 (+https://ali-ltyt.onrender.com)',
+      },
+    });
     if (!messageResponse.ok) return res.status(messageResponse.status === 404 ? 404 : 502).json({ error: 'Discord attachment was not found.' });
 
     const message = await messageResponse.json();
@@ -1306,13 +1309,16 @@ app.get('/discord/attachment/:messageId', async (req, res) => {
 
 app.get('/discord/getFileUrl', async (req, res) => {
   const messageId = String(req.query.messageId || '');
-  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-  if (!webhookUrl) return res.status(503).json({ error: 'DISCORD_WEBHOOK_URL is not configured on the server.' });
   if (!/^\d{17,20}$/.test(messageId)) return res.status(400).json({ error: 'A valid Discord messageId is required.' });
 
   try {
-    const cleanWebhookUrl = webhookUrl.split('?')[0].replace(/\/$/, '');
-    const response = await fetch(`${cleanWebhookUrl}/messages/${messageId}`);
+    const webhookUrl = getDiscordWebhookUrl();
+    const response = await fetch(`${webhookUrl}/messages/${messageId}`, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'ALI-ENTERPRISES/1.0 (+https://ali-ltyt.onrender.com)',
+      },
+    });
     if (!response.ok) {
       return res.status(response.status).json({ error: 'Discord attachment was not found.' });
     }
@@ -1328,15 +1334,19 @@ app.get('/discord/getFileUrl', async (req, res) => {
 
 app.delete('/discord/deleteMessage/:messageId', async (req, res) => {
   const { messageId } = req.params;
-  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-  if (!webhookUrl) return res.status(503).json({ error: 'DISCORD_WEBHOOK_URL is not configured on the server.' });
   if (!/^\d{17,20}$/.test(messageId)) return res.status(400).json({ error: 'A valid Discord messageId is required.' });
   
   try {
-    const cleanWebhookUrl = webhookUrl.split('?')[0].replace(/\/$/, '');
-    const deleteUrl = `${cleanWebhookUrl}/messages/${messageId}`;
+    const webhookUrl = getDiscordWebhookUrl();
+    const deleteUrl = `${webhookUrl}/messages/${messageId}`;
     
-    const response = await fetch(deleteUrl, { method: 'DELETE' });
+    const response = await fetch(deleteUrl, {
+      method: 'DELETE',
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'ALI-ENTERPRISES/1.0 (+https://ali-ltyt.onrender.com)',
+      },
+    });
     if (response.ok || response.status === 204) {
       res.json({ success: true });
     } else {
