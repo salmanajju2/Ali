@@ -1110,47 +1110,139 @@ app.get('/telegram/fetchFile', async (req, res) => {
   }
 });
 
+// Discord webhook calls are serialized per Render process so a burst of uploads from
+// multiple devices does not exhaust the webhook bucket at the same time.
+let discordUploadQueue = Promise.resolve();
+let discordNextAllowedAt = 0;
+
+function getDiscordWebhookUrl() {
+  const rawUrl = String(process.env.DISCORD_WEBHOOK_URL || '').trim();
+  if (!rawUrl) throw Object.assign(new Error('DISCORD_WEBHOOK_URL is not configured on the server.'), { httpStatus: 503 });
+
+  const parsed = new URL(rawUrl);
+  const validPath = /^\/api(?:\/v\d+)?\/webhooks\/\d+\/[^/]+\/?$/i.test(parsed.pathname);
+  if (parsed.protocol !== 'https:' || parsed.hostname !== 'discord.com' || !validPath) {
+    throw Object.assign(new Error('DISCORD_WEBHOOK_URL must be a valid discord.com webhook URL.'), { httpStatus: 503 });
+  }
+
+  // Use an explicit supported API version even when the environment variable uses
+  // Discord's legacy /api/webhooks form.
+  if (/^\/api\/webhooks\//i.test(parsed.pathname)) {
+    parsed.pathname = parsed.pathname.replace(/^\/api\/webhooks\//i, '/api/v10/webhooks/');
+  }
+  parsed.search = '';
+  return parsed.toString().replace(/\/$/, '');
+}
+
+function waitForDiscord(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function getDiscordRetryAfter(response, responseText) {
+  const headerSeconds = Number(response.headers.get('retry-after') || response.headers.get('x-ratelimit-reset-after'));
+  if (Number.isFinite(headerSeconds) && headerSeconds >= 0) return headerSeconds;
+  try {
+    const body = JSON.parse(responseText);
+    const bodySeconds = Number(body?.retry_after);
+    return Number.isFinite(bodySeconds) && bodySeconds >= 0 ? bodySeconds : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeDiscordError(response, responseText) {
+  const isCloudflareBan = response.status === 429 && /error\s+1015|access denied/i.test(responseText);
+  if (isCloudflareBan) {
+    return Object.assign(new Error('Discord temporarily rate-limited this server. Please wait a minute and retry.'), { httpStatus: 503 });
+  }
+
+  let body;
+  try { body = JSON.parse(responseText); } catch { body = null; }
+  const message = String(body?.message || '').trim();
+  const error = Object.assign(
+    new Error(message || `Discord upload failed with HTTP ${response.status}.`),
+    { httpStatus: response.status === 429 ? 503 : 502 }
+  );
+  return error;
+}
+
+async function postDiscordReceipt({ webhookUrl, buffer, mime, fileName }) {
+  const maxAttempts = 2;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const waitMs = Math.max(0, discordNextAllowedAt - Date.now());
+    if (waitMs) await waitForDiscord(waitMs);
+
+    const formData = new FormData();
+    formData.append('files[0]', new Blob([buffer], { type: mime }), fileName);
+    const response = await fetch(`${webhookUrl}?wait=true`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'ALI-ENTERPRISES/1.0 (+https://ali-ltyt.onrender.com)',
+      },
+      body: formData,
+    });
+    const responseText = await response.text();
+
+    if (response.ok) {
+      try {
+        return JSON.parse(responseText);
+      } catch {
+        throw Object.assign(new Error('Discord returned an invalid success response.'), { httpStatus: 502 });
+      }
+    }
+
+    const retryAfter = getDiscordRetryAfter(response, responseText);
+    const isCloudflareBan = response.status === 429 && /error\s+1015|access denied/i.test(responseText);
+    // A Cloudflare 1015 page is an IP restriction, not a normal bucket 429. Do
+    // not hammer Discord with retries that would extend the temporary restriction.
+    if (response.status === 429 && !isCloudflareBan && attempt < maxAttempts - 1 && retryAfter !== null && retryAfter <= 15) {
+      discordNextAllowedAt = Date.now() + Math.ceil(retryAfter * 1000);
+      await waitForDiscord(Math.ceil(retryAfter * 1000));
+      continue;
+    }
+
+    throw safeDiscordError(response, responseText);
+  }
+  throw Object.assign(new Error('Discord upload failed after retrying.'), { httpStatus: 502 });
+}
+
+function enqueueDiscordUpload(task) {
+  const run = discordUploadQueue.then(task, task);
+  discordUploadQueue = run.catch(() => undefined);
+  return run;
+}
+
 // Discord Upload Proxy
 app.post('/discord/upload', async (req, res) => {
   const base64Data = String(req.body?.base64Data || '');
   const rawFileName = String(req.body?.fileName || 'slip.jpg');
   const fileName = rawFileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'slip.jpg';
-  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-  if (!webhookUrl) return res.status(503).json({ error: 'DISCORD_WEBHOOK_URL is not configured on the server.' });
   if (!base64Data || base64Data.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'Upload is missing or too large.' });
-  
+
   try {
     const base64Parts = base64Data.split(',');
     if (base64Parts.length !== 2) return res.status(400).json({ error: 'Invalid base64 upload payload.' });
     const mime = base64Parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
     if (!/^(image\/(jpeg|png|webp)|application\/pdf)$/.test(mime)) return res.status(415).json({ error: 'Only JPG, PNG, WebP, and PDF files are supported.' });
-    const base64Content = base64Parts[1];
-    
-    const buffer = Buffer.from(base64Content, 'base64');
+    const buffer = Buffer.from(base64Parts[1], 'base64');
+    if (!buffer.length) return res.status(400).json({ error: 'Upload contains no file data.' });
     if (buffer.length > 15 * 1024 * 1024) return res.status(413).json({ error: 'Upload is too large.' });
-    const formData = new FormData();
-    const blob = new Blob([buffer], { type: mime });
-    formData.append('files[0]', blob, fileName);
-    
-    const response = await fetch(`${webhookUrl}?wait=true`, {
-      method: 'POST',
-      body: formData,
-    });
-    
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Discord returned ${response.status}: ${errText}`);
-    }
-    
-    const result = await response.json();
-    res.status(201).json({
+
+    const result = await enqueueDiscordUpload(() => postDiscordReceipt({
+      webhookUrl: getDiscordWebhookUrl(),
+      buffer,
+      mime,
+      fileName,
+    }));
+    return res.status(201).json({
       success: true,
       messageId: result.id,
-      url: result.attachments?.[0]?.url || ''
+      url: result.attachments?.[0]?.url || '',
     });
   } catch (error) {
-    console.error('Error in proxy /discord/upload:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Error in proxy /discord/upload:', error?.message || error);
+    return res.status(error?.httpStatus || 502).json({ error: error?.message || 'Unable to upload receipt to Discord.' });
   }
 });
 
