@@ -7,3 +7,6 @@ android/app/build/
 .env
 .env.*
 !.env.example
+
+# Local Firebase Android configuration
+android/app/google-services.json
