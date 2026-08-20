@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { DENOMINATIONS } from '../constants';
 import { NoteCounts } from '../types';
 
@@ -11,6 +11,7 @@ const CurrencyCounter: React.FC<CurrencyCounterProps> = ({ value, onChange }) =>
   // `-` ko type karte waqt browser temporary raw value rakhta hai. Is local draft se
   // user bina interruption `-1` ya `+1` likh sakta hai, aur complete number turant total mein aa jata hai.
   const [draftCounts, setDraftCounts] = useState<Record<number, string>>({});
+  const inputRefs = useRef<Record<number, HTMLInputElement | null>>({});
 
   const handleCountChange = (denomination: number, count: number) => {
     onChange({ ...value, [denomination]: Number.isFinite(count) ? Math.trunc(count) : 0 });
@@ -37,6 +38,16 @@ const CurrencyCounter: React.FC<CurrencyCounterProps> = ({ value, onChange }) =>
     });
   };
 
+  const focusNextInput = (denomination: number) => {
+    const currentIndex = DENOMINATIONS.indexOf(denomination);
+    const nextDenomination = DENOMINATIONS[currentIndex + 1];
+    if (nextDenomination === undefined) return;
+
+    window.requestAnimationFrame(() => {
+      inputRefs.current[nextDenomination]?.focus();
+    });
+  };
+
   return (
     <div className="space-y-2">
       <div
@@ -47,8 +58,9 @@ const CurrencyCounter: React.FC<CurrencyCounterProps> = ({ value, onChange }) =>
         <span className="text-center">Count</span>
         <span className="text-right">Amount</span>
       </div>
-      {DENOMINATIONS.map((denom) => {
+      {DENOMINATIONS.map((denom, index) => {
         const count = value[denom] ?? 0;
+        const isLastDenomination = index === DENOMINATIONS.length - 1;
         const total = count * denom;
         const hasValue = count !== 0;
         const visibleValue = draftCounts[denom] ?? (count === 0 ? '' : String(count));
@@ -71,13 +83,20 @@ const CurrencyCounter: React.FC<CurrencyCounterProps> = ({ value, onChange }) =>
             </label>
             <input
               id={`denom-${denom}`}
+              ref={(input) => { inputRefs.current[denom] = input; }}
               type="text"
               inputMode="decimal"
               pattern="[+-]?[0-9]*"
-              enterKeyHint="done"
+              enterKeyHint={isLastDenomination ? 'done' : 'next'}
               value={visibleValue}
               placeholder=""
               onChange={(e) => handleInputChange(denom, e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !isLastDenomination) {
+                  e.preventDefault();
+                  focusNextInput(denom);
+                }
+              }}
               className="w-full rounded-xl px-3 py-1.5 text-center text-sm font-black outline-none transition-all placeholder:text-slate-500"
               style={{
                 background: '#FFFFFF',
